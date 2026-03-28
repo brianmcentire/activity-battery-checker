@@ -15,7 +15,7 @@ import os
 from datetime import datetime, timezone
 
 from app.config import AppConfig
-from app.database import get_db, upsert_activity, get_token, mark_token_used, now_utc
+from app.database import get_db, upsert_activity, get_token, mark_token_used, store_battery_reading, get_activity, now_utc
 from app.models import GarminActivitySummary, GarminActivityFile
 from app.services.garmin_client import fetch_callback_url
 from battery_parser import parse_fit_bytes, ParseResult
@@ -245,7 +245,16 @@ async def process_activity_file(file_info: GarminActivityFile,
     # Parse the FIT file in-memory
     result = parse_fit_bytes(fit_data)
 
-    # Store parse result
+    # Look up activity_type from the activity record
+    activity_type = None
+    activity_time = None
+    with get_db(config.db_path) as db:
+        act = get_activity(db, activity_id)
+        if act:
+            activity_type = act.get("activity_type")
+            activity_time = act.get("start_time")
+
+    # Store parse result and battery readings
     with get_db(config.db_path) as db:
         if result.success:
             upsert_activity(
@@ -255,6 +264,26 @@ async def process_activity_file(file_info: GarminActivityFile,
                 processing_status="completed",
                 parse_result=json.dumps(result.to_dict()),
             )
+
+            # Store individual battery readings for trend tracking
+            for device in result.devices:
+                if not device.has_battery_info:
+                    continue
+                store_battery_reading(
+                    db,
+                    garmin_user_id=file_info.userId,
+                    garmin_activity_id=activity_id,
+                    device_serial=str(device.serial_number) if device.serial_number else None,
+                    device_name=device.device_name,
+                    classification=device.classification,
+                    manufacturer=device.manufacturer,
+                    battery_voltage=device.battery_voltage,
+                    battery_status=device.battery_status,
+                    battery_level=device.battery_level,
+                    activity_type=activity_type,
+                    activity_time=activity_time,
+                )
+
             logger.info(
                 "Parsed activity %s: %d devices, %d with battery, "
                 "head_unit=%s, external_sensors=%s",

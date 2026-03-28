@@ -9,10 +9,13 @@ import json
 import logging
 import sys
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from app.config import load_config
-from app.database import init_db, get_db, get_recent_activities, get_user
+from app.database import (
+    init_db, get_db, get_recent_activities, get_user,
+    get_device_history, get_all_device_histories,
+)
 from app.routers.auth import create_auth_router
 from app.routers.webhooks import create_webhook_router
 
@@ -58,7 +61,7 @@ async def user_status(garmin_user_id: str):
     with get_db(config.db_path) as db:
         user = get_user(db, garmin_user_id)
     if not user:
-        return {"error": "user not found"}, 404
+        raise HTTPException(status_code=404, detail="user not found")
     return {
         "garmin_user_id": user["garmin_user_id"],
         "auth_mode": user["auth_mode"],
@@ -137,4 +140,62 @@ async def user_batteries(garmin_user_id: str):
     return {
         "garmin_user_id": garmin_user_id,
         "devices": list(device_batteries.values()),
+    }
+
+
+@app.get("/users/{garmin_user_id}/battery-history")
+async def battery_history(garmin_user_id: str, device_serial: str = None,
+                          device_name: str = None, limit: int = 100):
+    """
+    Get battery voltage/status history for a specific device.
+
+    Query by device_serial (preferred) or device_name.
+    Returns readings ordered newest-first for charting voltage trends.
+    """
+    if not device_serial and not device_name:
+        # Return all devices' histories
+        with get_db(config.db_path) as db:
+            all_histories = get_all_device_histories(db, garmin_user_id)
+
+        return {
+            "garmin_user_id": garmin_user_id,
+            "devices": {
+                key: [
+                    {
+                        "activity_time": r["activity_time"],
+                        "battery_voltage": r["battery_voltage"],
+                        "battery_status": r["battery_status"],
+                        "battery_level": r["battery_level"],
+                        "activity_type": r["activity_type"],
+                        "garmin_activity_id": r["garmin_activity_id"],
+                    }
+                    for r in readings
+                ]
+                for key, readings in all_histories.items()
+            },
+        }
+
+    with get_db(config.db_path) as db:
+        readings = get_device_history(
+            db, garmin_user_id,
+            device_serial=device_serial,
+            device_name=device_name,
+            limit=limit,
+        )
+
+    device_key = device_serial or device_name
+    return {
+        "garmin_user_id": garmin_user_id,
+        "device": device_key,
+        "readings": [
+            {
+                "activity_time": r["activity_time"],
+                "battery_voltage": r["battery_voltage"],
+                "battery_status": r["battery_status"],
+                "battery_level": r["battery_level"],
+                "activity_type": r["activity_type"],
+                "garmin_activity_id": r["garmin_activity_id"],
+            }
+            for r in readings
+        ],
     }

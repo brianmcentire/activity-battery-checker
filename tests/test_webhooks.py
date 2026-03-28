@@ -4,21 +4,12 @@ Tests for Garmin webhook endpoints and activity processing.
 
 import json
 import os
-import tempfile
 import pytest
 
 from fastapi.testclient import TestClient
 
-# Set test DB to a temp file before importing app
-_test_db_fd, _test_db_path = tempfile.mkstemp(suffix=".db")
-os.close(_test_db_fd)
-os.environ["DB_PATH"] = _test_db_path
-os.environ["GARMIN_CONSUMER_KEY"] = "test-key"
-os.environ["GARMIN_CONSUMER_SECRET"] = "test-secret"
-
-from app.main import app
+from app.main import app, config
 from app.database import init_db, get_db, upsert_user, store_token
-from app.config import load_config
 from app.services.activity_processor import should_skip_activity, score_parse_result
 from app.models import GarminActivitySummary
 from battery_parser import ParseResult, DeviceInfo
@@ -41,15 +32,15 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def setup_db():
     """Initialize a fresh DB for each test."""
-    config = load_config()
     init_db(config.db_path)
     # Seed a test user
     with get_db(config.db_path) as db:
         upsert_user(db, "test-user-001")
         store_token(db, "test-user-001", "fake-access-token", "fake-token-secret")
     yield
-    # Clean up tables between tests
+    # Clean up tables between tests (order matters for FK constraints)
     with get_db(config.db_path) as db:
+        db.execute("DELETE FROM device_battery_readings")
         db.execute("DELETE FROM activities")
         db.execute("DELETE FROM tokens")
         db.execute("DELETE FROM users")

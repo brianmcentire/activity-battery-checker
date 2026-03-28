@@ -76,6 +76,31 @@ CREATE INDEX IF NOT EXISTS idx_activities_user
 
 CREATE INDEX IF NOT EXISTS idx_activities_status
     ON activities(processing_status);
+
+CREATE TABLE IF NOT EXISTS device_battery_readings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    garmin_user_id TEXT NOT NULL REFERENCES users(garmin_user_id),
+    garmin_activity_id TEXT NOT NULL,
+    device_serial TEXT,           -- serial number (best identifier across activities)
+    device_name TEXT NOT NULL,    -- human-readable name
+    classification TEXT,          -- head_unit, hr_strap, power_meter, etc.
+    manufacturer TEXT,
+    battery_voltage REAL,
+    battery_status TEXT,
+    battery_level INTEGER,
+    activity_type TEXT,
+    activity_time TEXT,           -- activity start time (for x-axis on graphs)
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_readings_user_device
+    ON device_battery_readings(garmin_user_id, device_serial);
+
+CREATE INDEX IF NOT EXISTS idx_readings_user_time
+    ON device_battery_readings(garmin_user_id, activity_time);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_activity_device
+    ON device_battery_readings(garmin_activity_id, device_serial, device_name);
 """
 
 
@@ -251,3 +276,71 @@ def get_recent_activities(db: sqlite3.Connection, garmin_user_id: str,
         LIMIT ?
     """, (garmin_user_id, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+# --- Battery reading operations ---
+
+def store_battery_reading(db: sqlite3.Connection, garmin_user_id: str,
+                          garmin_activity_id: str, device_serial: str | None,
+                          device_name: str, classification: str | None,
+                          manufacturer: str | None, battery_voltage: float | None,
+                          battery_status: str | None, battery_level: int | None,
+                          activity_type: str | None, activity_time: str | None) -> None:
+    """Store a battery reading for a device from an activity."""
+    db.execute("""
+        INSERT INTO device_battery_readings
+            (garmin_user_id, garmin_activity_id, device_serial, device_name,
+             classification, manufacturer, battery_voltage, battery_status,
+             battery_level, activity_type, activity_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(garmin_activity_id, device_serial, device_name) DO UPDATE SET
+            battery_voltage = excluded.battery_voltage,
+            battery_status = excluded.battery_status,
+            battery_level = excluded.battery_level
+    """, (garmin_user_id, garmin_activity_id, device_serial, device_name,
+          classification, manufacturer, battery_voltage, battery_status,
+          battery_level, activity_type, activity_time))
+
+
+def get_device_history(db: sqlite3.Connection, garmin_user_id: str,
+                       device_serial: str = None, device_name: str = None,
+                       limit: int = 100) -> list[dict]:
+    """Get battery reading history for a specific device."""
+    if device_serial:
+        rows = db.execute("""
+            SELECT * FROM device_battery_readings
+            WHERE garmin_user_id = ? AND device_serial = ?
+            ORDER BY activity_time DESC
+            LIMIT ?
+        """, (garmin_user_id, device_serial, limit)).fetchall()
+    elif device_name:
+        rows = db.execute("""
+            SELECT * FROM device_battery_readings
+            WHERE garmin_user_id = ? AND device_name = ?
+            ORDER BY activity_time DESC
+            LIMIT ?
+        """, (garmin_user_id, device_name, limit)).fetchall()
+    else:
+        return []
+    return [dict(r) for r in rows]
+
+
+def get_all_device_histories(db: sqlite3.Connection, garmin_user_id: str,
+                              limit_per_device: int = 50) -> dict[str, list[dict]]:
+    """Get battery reading history for all devices, grouped by device."""
+    rows = db.execute("""
+        SELECT * FROM device_battery_readings
+        WHERE garmin_user_id = ?
+        ORDER BY device_serial, device_name, activity_time DESC
+    """, (garmin_user_id,)).fetchall()
+
+    devices: dict[str, list[dict]] = {}
+    for row in rows:
+        r = dict(row)
+        key = r["device_serial"] or r["device_name"]
+        if key not in devices:
+            devices[key] = []
+        if len(devices[key]) < limit_per_device:
+            devices[key].append(r)
+
+    return devices
