@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+debug_fit_files/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+strava_tokens.json
+.pytest_cache/
+.claude/
+*.fit
+*.pdf

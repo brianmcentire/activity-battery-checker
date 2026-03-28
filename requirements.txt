@@ -1,0 +1,7 @@
+fitdecode
+fastapi
+uvicorn[standard]
+httpx
+authlib
+pydantic
+pytest
