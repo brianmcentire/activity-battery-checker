@@ -10,8 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app, config
 from app.database import init_db, get_db, upsert_user, store_token
-from app.services.activity_processor import should_skip_activity, score_parse_result
-from app.models import GarminActivitySummary
+from app.services.activity_processor import should_skip_activity_type, score_parse_result
 from battery_parser import ParseResult, DeviceInfo
 
 from fixtures.garmin_payloads import (
@@ -117,25 +116,26 @@ class TestPermissionChange:
 
 class TestActivityFiltering:
     def test_outdoor_not_skipped(self):
-        summary = GarminActivitySummary(**ACTIVITY_SUMMARY_OUTDOOR_RIDE["activitySummaries"][0])
-        assert should_skip_activity(summary) is None
+        assert should_skip_activity_type("ROAD_BIKING") is None
 
     def test_indoor_not_skipped(self):
         """Indoor cycling must NOT be skipped."""
-        summary = GarminActivitySummary(**ACTIVITY_SUMMARY_INDOOR_RIDE["activitySummaries"][0])
-        assert should_skip_activity(summary) is None
+        assert should_skip_activity_type("INDOOR_CYCLING") is None
 
     def test_virtual_skipped(self):
-        summary = GarminActivitySummary(**ACTIVITY_SUMMARY_VIRTUAL_RIDE["activitySummaries"][0])
-        reason = should_skip_activity(summary)
+        reason = should_skip_activity_type("VIRTUAL_RIDE")
         assert reason is not None
         assert "virtual" in reason.lower()
 
-    def test_manual_skipped(self):
-        summary = GarminActivitySummary(**ACTIVITY_SUMMARY_MANUAL["activitySummaries"][0])
-        reason = should_skip_activity(summary)
-        assert reason is not None
-        assert "manual" in reason.lower()
+    def test_manual_not_skipped_by_type(self):
+        """should_skip_activity_type only checks type, not manual flag."""
+        assert should_skip_activity_type("CYCLING") is None
+
+    def test_none_type_not_skipped(self):
+        assert should_skip_activity_type(None) is None
+
+    def test_empty_type_not_skipped(self):
+        assert should_skip_activity_type("") is None
 
 
 class TestActivityScoring:

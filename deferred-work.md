@@ -23,8 +23,11 @@ Push notifications (Pushover, email, etc.) when a device battery drops below a t
 
 ## Infrastructure
 
-### Lambda deployment
-Migrate from local FastAPI to AWS Lambda. Plan exists in `LAMBDA_IMPLEMENTATION_PLAN.md` but was written for Strava-first — needs updating for Garmin-first architecture.
+### Deployment options
+Current plan: ngrok for initial proof of concept (free, random URL changes each restart). When ready for stable hosting:
+- **EC2/Lightsail** — cheapest path, no code changes, run FastAPI as-is (~$3.50/mo)
+- **Lambda + API Gateway** — free at low volume, but requires Mangum adapter and replacing SQLite with DynamoDB
+- **ngrok paid** ($8/mo) — stable subdomain, keeps local dev workflow
 
 ### OAuth 2 migration
 Execute migration when Garmin enables OAuth 2 for the app. Design is already migration-safe (userId-keyed, abstracted token storage). See `plan.md` migration section.

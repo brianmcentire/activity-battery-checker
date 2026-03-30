@@ -1,12 +1,11 @@
 """
 Activity processing pipeline.
 
-Handles:
-- Activity filtering (skip virtual/manual/web-upload)
-- FIT file download from Garmin callback URLs
-- FIT parsing via battery_parser
-- Debug FIT file storage
-- Activity candidate scoring
+Handles the Garmin ping/pull flow:
+1. Receive ping with userId + callbackURL
+2. Fetch callbackURL (signed with OAuth) to get activity summaries or files
+3. Parse FIT files and extract battery data
+4. Store results
 """
 
 import json
@@ -15,19 +14,18 @@ import os
 from datetime import datetime, timezone
 
 from app.config import AppConfig
-from app.database import get_db, upsert_activity, get_token, mark_token_used, store_battery_reading, get_activity, now_utc
-from app.models import GarminActivitySummary, GarminActivityFile
+from app.database import (
+    get_db, upsert_activity, get_token, mark_token_used,
+    store_battery_reading, get_activity, now_utc,
+)
+from app.models import GarminPingEntry
 from app.services.garmin_client import fetch_callback_url
 from battery_parser import parse_fit_bytes, ParseResult
 
 logger = logging.getLogger(__name__)
 
-# Activity types that are purely virtual / simulated — no real device data expected.
-# NOTE: indoor types like INDOOR_CYCLING are NOT excluded because real Garmin devices
-# (Edge 1040, etc.) paired with real sensors (Assioma Favero, HRM, cadence) record
-# valid battery data on indoor trainer rides.
-# The virtual exclusion itself needs research — if a Garmin head unit records paired
-# sensor data during a Zwift ride, these FIT files may also contain battery info.
+# Activity types that are purely virtual / simulated.
+# Indoor types like INDOOR_CYCLING are NOT excluded — real sensors report battery there too.
 VIRTUAL_ACTIVITY_TYPES = {
     "VIRTUAL_RIDE",
     "VIRTUAL_RUN",
@@ -36,67 +34,32 @@ VIRTUAL_ACTIVITY_TYPES = {
 }
 
 
-def should_skip_activity(summary: GarminActivitySummary) -> str | None:
-    """
-    Check if an activity should be skipped.
-
-    Returns a reason string if the activity should be skipped, None if it should be processed.
-    """
-    if summary.manual:
-        return "manual activity"
-
-    activity_type = (summary.activityType or "").upper()
-    if activity_type in VIRTUAL_ACTIVITY_TYPES:
-        return f"virtual activity type: {summary.activityType}"
-
-    return None
-
-
-def should_skip_activity_dict(activity: dict) -> str | None:
-    """Check if an activity record (from DB) should be skipped."""
-    if activity.get("manual"):
-        return "manual activity"
-
-    if activity.get("is_web_upload"):
-        return "web upload"
-
-    activity_type = (activity.get("activity_type") or "").upper()
-    if activity_type in VIRTUAL_ACTIVITY_TYPES:
-        return f"virtual activity type: {activity.get('activity_type')}"
-
+def should_skip_activity_type(activity_type: str | None) -> str | None:
+    """Returns skip reason if activity type should be skipped, None otherwise."""
+    if not activity_type:
+        return None
+    if activity_type.upper() in VIRTUAL_ACTIVITY_TYPES:
+        return f"virtual activity type: {activity_type}"
     return None
 
 
 def score_parse_result(result: ParseResult, activity_type: str = None) -> float:
-    """
-    Score a parsed FIT result for how useful it is for battery monitoring.
-
-    Higher score = more useful. Range roughly 0.0 to 1.0.
-    """
+    """Score a parsed FIT result for usefulness. Higher = more useful."""
     if not result.success:
         return 0.0
 
     score = 0.0
-
-    # Has any battery data at all
     if result.devices_with_battery > 0:
         score += 0.3
-
-    # Has a real head unit (Garmin Edge, etc.)
     if result.has_head_unit:
         score += 0.2
-
-    # Has external sensors (HRM, power meter, radar, etc.)
     if result.has_external_sensors:
         score += 0.3
-
-    # Multiple devices with battery = richer data
     if result.devices_with_battery >= 3:
         score += 0.1
     elif result.devices_with_battery >= 2:
         score += 0.05
 
-    # Non-virtual activity type bonus
     atype = (activity_type or "").upper()
     if atype and atype not in VIRTUAL_ACTIVITY_TYPES:
         score += 0.1
@@ -104,148 +67,155 @@ def score_parse_result(result: ParseResult, activity_type: str = None) -> float:
     return min(score, 1.0)
 
 
-async def process_activity_summary(summary: GarminActivitySummary,
-                                    config: AppConfig) -> None:
+async def process_ping_callback(entry: GarminPingEntry, ping_type: str,
+                                 config: AppConfig) -> None:
     """
-    Process an incoming activity summary notification.
+    Process a Garmin ping notification entry.
 
-    Stores the activity record. Actual FIT download happens when the
-    activity file notification arrives.
+    For activity pings: fetch the callbackURL to get activity summaries,
+    then store them.
+    For activity file pings: fetch the callbackURL to get the FIT file,
+    then parse it.
     """
-    skip_reason = should_skip_activity(summary)
-    status = "skipped" if skip_reason else "pending"
+    user_id = entry.userId
 
-    start_time = None
-    if summary.startTimeInSeconds:
-        start_time = datetime.fromtimestamp(
-            summary.startTimeInSeconds, tz=timezone.utc
-        ).isoformat()
+    if not entry.callbackURL:
+        logger.warning("Ping entry for user %s has no callbackURL, skipping", user_id)
+        return
 
+    # Get user's OAuth token
     with get_db(config.db_path) as db:
-        upsert_activity(
-            db,
-            garmin_user_id=summary.userId,
-            garmin_activity_id=str(summary.activityId),
-            garmin_summary_id=summary.summaryId,
-            activity_type=summary.activityType,
-            device_name=summary.deviceName,
-            manual=1 if summary.manual else 0,
-            start_time=start_time,
-            processing_status=status,
-            processing_error=skip_reason,
-        )
-
-    if skip_reason:
-        logger.info("Skipped activity %s: %s", summary.activityId, skip_reason)
-    else:
-        logger.info("Stored activity summary %s (type=%s, device=%s)",
-                    summary.activityId, summary.activityType, summary.deviceName)
-
-
-async def process_activity_file(file_info: GarminActivityFile,
-                                 config: AppConfig) -> ParseResult | None:
-    """
-    Process an incoming activity file notification.
-
-    Downloads the FIT file via callback URL, parses it, and stores results.
-    """
-    activity_id = str(file_info.activityId)
-
-    # Check file type
-    if file_info.fileType and file_info.fileType.upper() != "FIT":
-        logger.info("Skipping non-FIT file for activity %s: %s",
-                    activity_id, file_info.fileType)
-        with get_db(config.db_path) as db:
-            upsert_activity(
-                db,
-                garmin_user_id=file_info.userId,
-                garmin_activity_id=activity_id,
-                file_type=file_info.fileType,
-                processing_status="skipped",
-                processing_error=f"non-FIT file type: {file_info.fileType}",
-            )
-        return None
-
-    if not file_info.callbackURL:
-        logger.warning("No callback URL for activity %s", activity_id)
-        with get_db(config.db_path) as db:
-            upsert_activity(
-                db,
-                garmin_user_id=file_info.userId,
-                garmin_activity_id=activity_id,
-                processing_status="failed",
-                processing_error="no callback URL provided",
-            )
-        return None
-
-    # Update activity record with file info
-    with get_db(config.db_path) as db:
-        upsert_activity(
-            db,
-            garmin_user_id=file_info.userId,
-            garmin_activity_id=activity_id,
-            file_type=file_info.fileType,
-            callback_url=file_info.callbackURL,
-            callback_received_at=now_utc(),
-            processing_status="downloading",
-        )
-
-        # Get user's OAuth token for signed request
-        token = get_token(db, file_info.userId)
+        token = get_token(db, user_id)
 
     if not token:
-        logger.error("No token found for user %s, cannot download FIT file",
-                    file_info.userId)
-        with get_db(config.db_path) as db:
-            upsert_activity(
-                db,
-                garmin_user_id=file_info.userId,
-                garmin_activity_id=activity_id,
-                processing_status="failed",
-                processing_error="no OAuth token for user",
-            )
-        return None
+        logger.error("No token found for user %s, cannot process ping", user_id)
+        return
 
-    # Download the FIT file
-    fit_data = await fetch_callback_url(
-        callback_url=file_info.callbackURL,
+    # Fetch the callback URL
+    logger.info("Fetching %s callback for user %s: %s",
+                ping_type, user_id, entry.callbackURL[:100])
+
+    data = await fetch_callback_url(
+        callback_url=entry.callbackURL,
         access_token=token["access_token"],
         token_secret=token["token_secret"],
         consumer_key=config.garmin.consumer_key,
         consumer_secret=config.garmin.consumer_secret,
     )
 
-    if not fit_data:
-        with get_db(config.db_path) as db:
-            upsert_activity(
-                db,
-                garmin_user_id=file_info.userId,
-                garmin_activity_id=activity_id,
-                processing_status="failed",
-                processing_error="failed to download FIT file from callback URL",
-            )
-        return None
+    if not data:
+        logger.error("Failed to fetch callback URL for user %s", user_id)
+        return
 
     # Mark token as successfully used
     with get_db(config.db_path) as db:
-        mark_token_used(db, file_info.userId)
+        mark_token_used(db, user_id)
 
+    if ping_type == "activities":
+        await _process_activity_summaries(data, user_id, config)
+    elif ping_type == "activity_files":
+        await _process_activity_file(data, entry, user_id, config)
+    else:
+        logger.warning("Unknown ping type: %s", ping_type)
+
+
+async def _process_activity_summaries(data: bytes, user_id: str,
+                                       config: AppConfig) -> None:
+    """Process activity summary data returned from a callback URL."""
+    try:
+        summaries = json.loads(data)
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse activity summary response: %s", e)
+        return
+
+    # Garmin returns a list of activity summaries
+    if isinstance(summaries, dict):
+        summaries = [summaries]
+
+    logger.info("Received %d activity summaries for user %s", len(summaries), user_id)
+
+    for summary in summaries:
+        activity_id = str(summary.get("activityId", summary.get("summaryId", "")))
+        if not activity_id:
+            logger.warning("Activity summary missing ID, skipping: %s",
+                          json.dumps(summary)[:200])
+            continue
+
+        activity_type = summary.get("activityType")
+        manual = summary.get("manual", False)
+        is_web_upload = summary.get("isWebUpload")
+        device_name = summary.get("deviceName")
+
+        # Check if we should skip
+        skip_reason = None
+        if manual:
+            skip_reason = "manual activity"
+        elif is_web_upload:
+            skip_reason = "web upload"
+        else:
+            skip_reason = should_skip_activity_type(activity_type)
+
+        status = "skipped" if skip_reason else "pending"
+
+        start_time = None
+        start_seconds = summary.get("startTimeInSeconds")
+        if start_seconds:
+            start_time = datetime.fromtimestamp(
+                start_seconds, tz=timezone.utc
+            ).isoformat()
+
+        with get_db(config.db_path) as db:
+            upsert_activity(
+                db,
+                garmin_user_id=user_id,
+                garmin_activity_id=activity_id,
+                garmin_summary_id=summary.get("summaryId"),
+                activity_type=activity_type,
+                device_name=device_name,
+                manual=1 if manual else 0,
+                is_web_upload=1 if is_web_upload else 0,
+                start_time=start_time,
+                processing_status=status,
+                processing_error=skip_reason,
+            )
+
+        if skip_reason:
+            logger.info("Skipped activity %s: %s", activity_id, skip_reason)
+        else:
+            logger.info("Stored activity %s (type=%s, device=%s)",
+                       activity_id, activity_type, device_name)
+
+
+async def _process_activity_file(data: bytes, entry: GarminPingEntry,
+                                  user_id: str, config: AppConfig) -> None:
+    """Process a FIT file downloaded from a callback URL."""
+    # Try to determine activity ID from the entry or from existing records
+    activity_id = str(entry.activityId) if entry.activityId else f"file-{now_utc()}"
+
+    # Check if it's actually a FIT file (FIT files start with specific bytes)
+    if len(data) < 12:
+        logger.warning("Activity file too small (%d bytes), skipping", len(data))
+        return
+
+    # Store file metadata
+    with get_db(config.db_path) as db:
         upsert_activity(
             db,
-            garmin_user_id=file_info.userId,
+            garmin_user_id=user_id,
             garmin_activity_id=activity_id,
+            file_type="FIT",
             file_downloaded_at=now_utc(),
             processing_status="parsing",
         )
 
     # Debug: save FIT file to disk
     if config.save_fit_files:
-        _save_debug_fit_file(fit_data, activity_id, config.fit_files_dir)
+        _save_debug_fit_file(data, activity_id, config.fit_files_dir)
 
     # Parse the FIT file in-memory
-    result = parse_fit_bytes(fit_data)
+    result = parse_fit_bytes(data)
 
-    # Look up activity_type from the activity record
+    # Look up activity metadata
     activity_type = None
     activity_time = None
     with get_db(config.db_path) as db:
@@ -259,19 +229,18 @@ async def process_activity_file(file_info: GarminActivityFile,
         if result.success:
             upsert_activity(
                 db,
-                garmin_user_id=file_info.userId,
+                garmin_user_id=user_id,
                 garmin_activity_id=activity_id,
                 processing_status="completed",
                 parse_result=json.dumps(result.to_dict()),
             )
 
-            # Store individual battery readings for trend tracking
             for device in result.devices:
                 if not device.has_battery_info:
                     continue
                 store_battery_reading(
                     db,
-                    garmin_user_id=file_info.userId,
+                    garmin_user_id=user_id,
                     garmin_activity_id=activity_id,
                     device_serial=str(device.serial_number) if device.serial_number else None,
                     device_name=device.device_name,
@@ -293,15 +262,13 @@ async def process_activity_file(file_info: GarminActivityFile,
         else:
             upsert_activity(
                 db,
-                garmin_user_id=file_info.userId,
+                garmin_user_id=user_id,
                 garmin_activity_id=activity_id,
                 processing_status="failed",
                 processing_error=f"FIT parse error: {result.error}",
             )
             logger.error("Failed to parse FIT for activity %s: %s",
                         activity_id, result.error)
-
-    return result
 
 
 def _save_debug_fit_file(data: bytes, activity_id: str, fit_dir: str) -> None:

@@ -2,15 +2,14 @@
 Garmin webhook endpoints.
 
 Receives ping notifications from Garmin for:
-- Activity summaries
-- Activity files
+- Activity summaries (with callbackURL to pull data)
+- Activity files (with callbackURL to pull FIT files)
 - Deregistrations
 - User permission changes
 
 All handlers respond 200 immediately and process asynchronously.
 """
 
-import asyncio
 import json
 import logging
 
@@ -19,15 +18,12 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from app.config import AppConfig
 from app.database import get_db, deregister_user, update_user_permissions
 from app.models import (
-    GarminActivitySummaryPayload,
-    GarminActivityFilePayload,
+    GarminActivityPingPayload,
+    GarminActivityFilePingPayload,
     GarminDeregistrationPayload,
     GarminPermissionChangePayload,
 )
-from app.services.activity_processor import (
-    process_activity_summary,
-    process_activity_file,
-)
+from app.services.activity_processor import process_ping_callback
 
 logger = logging.getLogger(__name__)
 
@@ -40,62 +36,61 @@ def create_webhook_router(config: AppConfig) -> APIRouter:
     @router.post("/activities")
     async def activity_summaries(request: Request, background_tasks: BackgroundTasks):
         """
-        Receive activity summary notifications from Garmin.
+        Receive activity summary ping notifications from Garmin.
 
-        Responds 200 immediately, processes summaries in background.
+        Garmin sends: {"activities": [{"userId": "...", "callbackURL": "..."}]}
+        We respond 200 immediately, then fetch data from callbackURL in background.
         """
         body = await request.json()
-        logger.info("Received activity summary notification: %d bytes", len(json.dumps(body)))
+        logger.info("Received activity ping: %s", json.dumps(body)[:500])
 
         try:
-            payload = GarminActivitySummaryPayload(**body)
+            payload = GarminActivityPingPayload(**body)
         except Exception as e:
-            logger.error("Failed to parse activity summary payload: %s", e)
-            # Still return 200 — Garmin expects it
+            logger.error("Failed to parse activity ping payload: %s", e)
             return {"status": "received"}
 
-        summaries = payload.get_summaries()
-        logger.info("Processing %d activity summaries", len(summaries))
+        entries = payload.get_entries()
+        logger.info("Processing %d activity ping entries", len(entries))
 
-        for summary in summaries:
-            background_tasks.add_task(process_activity_summary, summary, config)
+        for entry in entries:
+            background_tasks.add_task(
+                process_ping_callback, entry, "activities", config
+            )
 
-        return {"status": "received", "count": len(summaries)}
+        return {"status": "received", "count": len(entries)}
 
     @router.post("/activity-files")
     async def activity_files(request: Request, background_tasks: BackgroundTasks):
         """
-        Receive activity file notifications from Garmin.
+        Receive activity file ping notifications from Garmin.
 
-        Downloads FIT files via callback URL and parses them.
-        Responds 200 immediately, processes files in background.
+        Same ping format — callbackURL points to the file download.
         """
         body = await request.json()
-        logger.info("Received activity file notification: %d bytes", len(json.dumps(body)))
+        logger.info("Received activity file ping: %s", json.dumps(body)[:500])
 
         try:
-            payload = GarminActivityFilePayload(**body)
+            payload = GarminActivityFilePingPayload(**body)
         except Exception as e:
-            logger.error("Failed to parse activity file payload: %s", e)
+            logger.error("Failed to parse activity file ping payload: %s", e)
             return {"status": "received"}
 
-        files = payload.get_files()
-        logger.info("Processing %d activity files", len(files))
+        entries = payload.get_entries()
+        logger.info("Processing %d activity file ping entries", len(entries))
 
-        for file_info in files:
-            background_tasks.add_task(process_activity_file, file_info, config)
+        for entry in entries:
+            background_tasks.add_task(
+                process_ping_callback, entry, "activity_files", config
+            )
 
-        return {"status": "received", "count": len(files)}
+        return {"status": "received", "count": len(entries)}
 
     @router.post("/deregistrations")
     async def deregistrations(request: Request):
-        """
-        Handle user deregistration notifications from Garmin.
-
-        Processed synchronously since it's a simple DB update.
-        """
+        """Handle user deregistration notifications from Garmin."""
         body = await request.json()
-        logger.info("Received deregistration notification")
+        logger.info("Received deregistration notification: %s", json.dumps(body)[:500])
 
         try:
             payload = GarminDeregistrationPayload(**body)
@@ -103,22 +98,18 @@ def create_webhook_router(config: AppConfig) -> APIRouter:
             logger.error("Failed to parse deregistration payload: %s", e)
             return {"status": "received"}
 
-        for dereg in payload.deregistrations:
+        for entry in payload.get_entries():
             with get_db(config.db_path) as db:
-                deregister_user(db, dereg.userId)
-            logger.info("Deregistered user %s", dereg.userId)
+                deregister_user(db, entry.userId)
+            logger.info("Deregistered user %s", entry.userId)
 
-        return {"status": "received", "count": len(payload.deregistrations)}
+        return {"status": "received", "count": len(payload.get_entries())}
 
     @router.post("/permissions")
     async def permission_changes(request: Request):
-        """
-        Handle user permission change notifications from Garmin.
-
-        Processed synchronously since it's a simple DB update.
-        """
+        """Handle user permission change notifications from Garmin."""
         body = await request.json()
-        logger.info("Received permission change notification")
+        logger.info("Received permission change notification: %s", json.dumps(body)[:500])
 
         try:
             payload = GarminPermissionChangePayload(**body)
@@ -126,13 +117,12 @@ def create_webhook_router(config: AppConfig) -> APIRouter:
             logger.error("Failed to parse permission change payload: %s", e)
             return {"status": "received"}
 
-        for change in payload.permissionChanges:
-            permissions_json = json.dumps(change.permissions) if change.permissions else None
+        for entry in payload.get_entries():
+            permissions_json = json.dumps(entry.permissions) if entry.permissions else None
             with get_db(config.db_path) as db:
-                update_user_permissions(db, change.userId, permissions_json)
-            logger.info("Updated permissions for user %s: %s",
-                       change.userId, change.permissions)
+                update_user_permissions(db, entry.userId, permissions_json)
+            logger.info("Updated permissions for user %s", entry.userId)
 
-        return {"status": "received", "count": len(payload.permissionChanges)}
+        return {"status": "received", "count": len(payload.get_entries())}
 
     return router

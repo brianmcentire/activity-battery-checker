@@ -5,3 +5,4 @@ httpx
 authlib
 pydantic
 pytest
+python-dotenv

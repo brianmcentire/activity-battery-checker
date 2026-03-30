@@ -1,19 +1,26 @@
 """
 Pydantic models for API request/response schemas and Garmin webhook payloads.
+
+These models match the actual Garmin Activity API ping notification format.
+Garmin sends pings with userId + callbackURL; the actual activity data
+is fetched by calling the callbackURL.
 """
 
 from pydantic import BaseModel
 from typing import Optional
 
 
-# --- Garmin webhook payload models ---
+# --- Garmin ping notification models ---
+# Garmin ping format: {"activities": [{"userId": "...", "callbackURL": "..."}]}
 
-class GarminActivitySummary(BaseModel):
-    """A single activity summary from Garmin ping notification."""
+class GarminPingEntry(BaseModel):
+    """A single entry in a Garmin ping notification."""
     userId: str
-    userAccessToken: str
-    summaryId: str
-    activityId: int
+    userAccessToken: Optional[str] = None
+    callbackURL: Optional[str] = None
+    # These fields may appear in push notifications or backfill data
+    summaryId: Optional[str] = None
+    activityId: Optional[int] = None
     activityName: Optional[str] = None
     activityType: Optional[str] = None
     deviceName: Optional[str] = None
@@ -21,58 +28,58 @@ class GarminActivitySummary(BaseModel):
     startTimeInSeconds: Optional[int] = None
     startTimeOffsetInSeconds: Optional[int] = None
     durationInSeconds: Optional[int] = None
-    callbackURL: Optional[str] = None
-
-
-class GarminActivityFile(BaseModel):
-    """A single activity file notification from Garmin."""
-    userId: str
-    userAccessToken: str
-    summaryId: str
-    activityId: int
     fileType: Optional[str] = None
-    callbackURL: Optional[str] = None
 
 
-class GarminDeregistration(BaseModel):
-    """Deregistration notification from Garmin."""
-    userId: str
-    userAccessToken: str
+class GarminActivityPingPayload(BaseModel):
+    """Ping payload for activity summaries."""
+    activities: Optional[list[GarminPingEntry]] = None
+    activitySummaries: Optional[list[GarminPingEntry]] = None
+
+    def get_entries(self) -> list[GarminPingEntry]:
+        return self.activities or self.activitySummaries or []
 
 
-class GarminPermissionChange(BaseModel):
-    """Permission change notification from Garmin."""
-    userId: str
-    userAccessToken: str
-    permissions: Optional[list[str]] = None
+class GarminActivityFilePingPayload(BaseModel):
+    """Ping payload for activity files."""
+    activityFiles: Optional[list[GarminPingEntry]] = None
 
-
-class GarminActivitySummaryPayload(BaseModel):
-    """Top-level payload for activity summary notifications."""
-    activitySummaries: Optional[list[GarminActivitySummary]] = None
-    # Garmin may send as "activities" in some API versions
-    activities: Optional[list[GarminActivitySummary]] = None
-
-    def get_summaries(self) -> list[GarminActivitySummary]:
-        return self.activitySummaries or self.activities or []
-
-
-class GarminActivityFilePayload(BaseModel):
-    """Top-level payload for activity file notifications."""
-    activityFiles: Optional[list[GarminActivityFile]] = None
-
-    def get_files(self) -> list[GarminActivityFile]:
+    def get_entries(self) -> list[GarminPingEntry]:
         return self.activityFiles or []
 
 
+class GarminDeregistrationEntry(BaseModel):
+    """A single deregistration entry."""
+    userId: str
+    userAccessToken: Optional[str] = None
+
+
 class GarminDeregistrationPayload(BaseModel):
-    """Top-level payload for deregistration notifications."""
-    deregistrations: list[GarminDeregistration]
+    """Payload for deregistration notifications."""
+    deregistrations: Optional[list[GarminDeregistrationEntry]] = None
+
+    def get_entries(self) -> list[GarminDeregistrationEntry]:
+        return self.deregistrations or []
+
+
+class GarminPermissionChangeEntry(BaseModel):
+    """A single permission change entry."""
+    userId: str
+    userAccessToken: Optional[str] = None
+    permissions: Optional[list[str]] = None
+    callbackURL: Optional[str] = None
+    uploadStartTimeInSeconds: Optional[int] = None
+    uploadEndTimeInSeconds: Optional[int] = None
 
 
 class GarminPermissionChangePayload(BaseModel):
-    """Top-level payload for permission change notifications."""
-    permissionChanges: list[GarminPermissionChange]
+    """Payload for permission change notifications.
+    Garmin sends this as 'userPermissionsChange', not 'permissionChanges'."""
+    userPermissionsChange: Optional[list[GarminPermissionChangeEntry]] = None
+    permissionChanges: Optional[list[GarminPermissionChangeEntry]] = None
+
+    def get_entries(self) -> list[GarminPermissionChangeEntry]:
+        return self.userPermissionsChange or self.permissionChanges or []
 
 
 # --- API response models ---
