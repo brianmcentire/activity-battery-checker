@@ -14,7 +14,10 @@ from typing import Optional
 # Garmin ping format: {"activities": [{"userId": "...", "callbackURL": "..."}]}
 
 class GarminPingEntry(BaseModel):
-    """A single entry in a Garmin ping notification."""
+    """A single entry in a Garmin ping notification.
+    Garmin sends many extra fields we don't use — model_config allows them."""
+    model_config = {"extra": "allow"}
+
     userId: str
     userAccessToken: Optional[str] = None
     callbackURL: Optional[str] = None
@@ -25,6 +28,7 @@ class GarminPingEntry(BaseModel):
     activityType: Optional[str] = None
     deviceName: Optional[str] = None
     manual: Optional[bool] = None
+    isWebUpload: Optional[bool] = None
     startTimeInSeconds: Optional[int] = None
     startTimeOffsetInSeconds: Optional[int] = None
     durationInSeconds: Optional[int] = None

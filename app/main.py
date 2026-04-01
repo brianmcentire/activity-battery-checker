@@ -9,24 +9,29 @@ import json
 import logging
 import sys
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Query
 
 from app.config import load_config
 from app.database import (
     init_db, get_db, get_recent_activities, get_user,
     get_device_history, get_all_device_histories,
+    upsert_user, upsert_activity, store_battery_reading, now_utc,
 )
+from battery_parser import parse_fit_bytes
 from app.routers.auth import create_auth_router
 from app.routers.webhooks import create_webhook_router
 
 config = load_config()
 
-# Logging setup
-logging.basicConfig(
-    level=getattr(logging, config.log_level.upper(), logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    stream=sys.stdout,
-)
+# Logging setup — unified timestamp format for all loggers including uvicorn
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+log_level = getattr(logging, config.log_level.upper(), logging.INFO)
+logging.basicConfig(level=log_level, format=LOG_FORMAT, stream=sys.stdout, force=True)
+# Override uvicorn's loggers so they use the same format
+for uv_logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    uv_logger = logging.getLogger(uv_logger_name)
+    uv_logger.handlers.clear()
+    uv_logger.propagate = True
 logger = logging.getLogger(__name__)
 
 # Initialize database
@@ -198,4 +203,66 @@ async def battery_history(garmin_user_id: str, device_serial: str = None,
             }
             for r in readings
         ],
+    }
+
+
+@app.post("/upload/fit")
+async def upload_fit(request: Request,
+                     garmin_user_id: str = Query(default=None)):
+    """
+    Upload a FIT file for instant battery analysis.
+
+    Returns device/battery breakdown immediately. If garmin_user_id is provided,
+    also stores the results in the database for history tracking.
+
+    Usage: curl -X POST http://localhost:8000/upload/fit --data-binary @activity.fit
+    """
+    body = await request.body()
+    if len(body) < 12:
+        raise HTTPException(status_code=400, detail="File too small to be a valid FIT file")
+
+    result = parse_fit_bytes(body)
+    if not result.success:
+        raise HTTPException(status_code=422, detail=f"FIT parse error: {result.error}")
+
+    activity_id = f"upload-{now_utc().replace(':', '').replace('-', '').replace(' ', '-')}"
+    stored = False
+
+    if garmin_user_id:
+        with get_db(config.db_path) as db:
+            # Ensure user exists
+            upsert_user(db, garmin_user_id)
+            upsert_activity(
+                db,
+                garmin_user_id=garmin_user_id,
+                garmin_activity_id=activity_id,
+                processing_status="completed",
+                parse_result=json.dumps(result.to_dict()),
+            )
+            for device in result.devices:
+                if not device.has_battery_info:
+                    continue
+                store_battery_reading(
+                    db,
+                    garmin_user_id=garmin_user_id,
+                    garmin_activity_id=activity_id,
+                    device_serial=str(device.serial_number) if device.serial_number else None,
+                    device_name=device.device_name,
+                    classification=device.classification,
+                    manufacturer=device.manufacturer,
+                    battery_voltage=device.battery_voltage,
+                    battery_status=device.battery_status,
+                    battery_level=device.battery_level,
+                    software_version=device.software_version,
+                )
+            stored = True
+
+    return {
+        "activity_id": activity_id,
+        "total_devices": result.total_devices,
+        "devices_with_battery": result.devices_with_battery,
+        "has_head_unit": result.has_head_unit,
+        "has_external_sensors": result.has_external_sensors,
+        "devices": [d.to_dict() for d in result.devices],
+        "stored": stored,
     }

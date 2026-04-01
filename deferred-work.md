@@ -13,6 +13,9 @@ Decide whether to expose parsed battery results through a minimal web UI or keep
 ### Do Zwift/virtual FIT files contain battery data?
 When a Garmin head unit (e.g., Edge 1040) records a Zwift ride, does the FIT file still contain `device_info` with battery fields for paired sensors (HRM, power meter, etc.)? If yes, virtual activity types should not be excluded. Needs a real Zwift FIT file recorded on a Garmin device to verify.
 
+### Head unit battery level
+Garmin head units (Edge, fenix, etc.) don't write their own battery into FIT `device_info` records — all battery fields are `None` for the creator device. The official Garmin Health/Activity API also has no device status endpoint. Unofficial libraries (`garminconnect`, `garth`) can poll device battery from Garmin Connect's private API, but this violates Garmin TOS and breaks when Garmin changes their internal endpoints. Revisit if Garmin adds a device status endpoint to the official Health API.
+
 ### Sterzo steering sensor
 Does Garmin record Sterzo as a device in `device_info`? Does it report battery? Needs a FIT file from a ride using Sterzo to check.
 

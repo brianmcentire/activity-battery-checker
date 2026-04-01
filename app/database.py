@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS device_battery_readings (
     device_name TEXT NOT NULL,    -- human-readable name
     classification TEXT,          -- head_unit, hr_strap, power_meter, etc.
     manufacturer TEXT,
+    software_version TEXT,
     battery_voltage REAL,
     battery_status TEXT,
     battery_level INTEGER,
@@ -285,21 +286,23 @@ def store_battery_reading(db: sqlite3.Connection, garmin_user_id: str,
                           device_name: str, classification: str | None,
                           manufacturer: str | None, battery_voltage: float | None,
                           battery_status: str | None, battery_level: int | None,
-                          activity_type: str | None, activity_time: str | None) -> None:
+                          activity_type: str | None, activity_time: str | None,
+                          software_version: str | None = None) -> None:
     """Store a battery reading for a device from an activity."""
     db.execute("""
         INSERT INTO device_battery_readings
             (garmin_user_id, garmin_activity_id, device_serial, device_name,
-             classification, manufacturer, battery_voltage, battery_status,
-             battery_level, activity_type, activity_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             classification, manufacturer, software_version, battery_voltage,
+             battery_status, battery_level, activity_type, activity_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(garmin_activity_id, device_serial, device_name) DO UPDATE SET
+            software_version = excluded.software_version,
             battery_voltage = excluded.battery_voltage,
             battery_status = excluded.battery_status,
             battery_level = excluded.battery_level
     """, (garmin_user_id, garmin_activity_id, device_serial, device_name,
-          classification, manufacturer, battery_voltage, battery_status,
-          battery_level, activity_type, activity_time))
+          classification, manufacturer, software_version, battery_voltage,
+          battery_status, battery_level, activity_type, activity_time))
 
 
 def get_device_history(db: sqlite3.Connection, garmin_user_id: str,

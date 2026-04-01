@@ -70,6 +70,7 @@ GARMIN_PRODUCTS = {
     1497: 'Varia Light',
     2611: 'Varia UT800',
     3592: 'Varia RTL515/RCT715',
+    4684: 'Varia RearVue 820',
 
     # Rally power meters
     3112: 'Rally RS100',
@@ -178,6 +179,17 @@ def classify_device(info: dict, device_index=None) -> str:
         if local_type not in ('barometer', 'gps', 'accelerometer'):
             return 'head_unit'
 
+    # Check product ID for known device types
+    product_id = info.get('garmin_product') or info.get('product')
+    if isinstance(product_id, int):
+        product_name = get_garmin_product_name(product_id)
+        if product_name:
+            pn_lower = product_name.lower()
+            if 'varia' in pn_lower:
+                return 'radar'
+            if 'rally' in pn_lower:
+                return 'power_meter'
+
     # Check manufacturer hints
     manufacturer = str(info.get('manufacturer', '')).lower()
     if 'favero' in manufacturer:
@@ -227,6 +239,7 @@ class DeviceInfo:
     battery_voltage: Optional[float] = None
     battery_status: Optional[str] = None
     battery_level: Optional[int] = None
+    software_version: Optional[str] = None
     source_type: Optional[str] = None
     has_battery_info: bool = False
 
@@ -305,6 +318,9 @@ def _build_device_info(device_index, raw_info: dict) -> DeviceInfo:
     batt_status_raw = raw_info.get('battery_status')
     batt_status = format_battery_status(batt_status_raw) if batt_status_raw is not None else None
 
+    sw_version = raw_info.get('software_version')
+    sw_version_str = str(sw_version) if sw_version is not None else None
+
     source_type = raw_info.get('source_type')
     source_type_str = str(source_type) if source_type is not None else None
 
@@ -316,6 +332,7 @@ def _build_device_info(device_index, raw_info: dict) -> DeviceInfo:
         product=product_name,
         product_id=product_id if isinstance(product_id, int) else None,
         serial_number=raw_info.get('serial_number'),
+        software_version=sw_version_str,
         battery_voltage=raw_info.get('battery_voltage'),
         battery_status=batt_status,
         battery_level=raw_info.get('battery_level'),

@@ -72,28 +72,53 @@ async def process_ping_callback(entry: GarminPingEntry, ping_type: str,
     """
     Process a Garmin ping notification entry.
 
-    For activity pings: fetch the callbackURL to get activity summaries,
-    then store them.
-    For activity file pings: fetch the callbackURL to get the FIT file,
-    then parse it.
+    Garmin sends two formats:
+    1. Ping/pull: entry has callbackURL — fetch it with OAuth to get data
+    2. Inline: entry has data directly (common with backfill) — use it as-is
+
+    For activity summaries, inline data is common (activityId, activityType, etc.
+    are right in the ping). For activity files, a callbackURL is always needed.
     """
     user_id = entry.userId
 
-    if not entry.callbackURL:
-        logger.warning("Ping entry for user %s has no callbackURL, skipping", user_id)
+    # Activity summaries can come with inline data (no callbackURL needed)
+    if ping_type == "activities":
+        if entry.callbackURL:
+            data = await _fetch_callback(entry, user_id, config)
+            if not data:
+                return
+            await _process_activity_summaries(data, user_id, config)
+        else:
+            # Inline summary data — store directly from the ping entry
+            await _process_inline_activity_summary(entry, user_id, config)
         return
 
-    # Get user's OAuth token
+    # Activity files always need a callbackURL to download the FIT file
+    if ping_type == "activity_files":
+        if not entry.callbackURL:
+            logger.warning("Activity file ping for user %s has no callbackURL, skipping", user_id)
+            return
+        data = await _fetch_callback(entry, user_id, config)
+        if not data:
+            return
+        await _process_activity_file(data, entry, user_id, config)
+        return
+
+    logger.warning("Unknown ping type: %s", ping_type)
+
+
+async def _fetch_callback(entry: GarminPingEntry, user_id: str,
+                           config: AppConfig) -> bytes | None:
+    """Fetch a callbackURL using the user's OAuth credentials."""
     with get_db(config.db_path) as db:
         token = get_token(db, user_id)
 
     if not token:
-        logger.error("No token found for user %s, cannot process ping", user_id)
-        return
+        logger.error("No token found for user %s, cannot fetch callback", user_id)
+        return None
 
-    # Fetch the callback URL
-    logger.info("Fetching %s callback for user %s: %s",
-                ping_type, user_id, entry.callbackURL[:100])
+    logger.info("Fetching callback for user %s: %s",
+                user_id, entry.callbackURL[:100])
 
     data = await fetch_callback_url(
         callback_url=entry.callbackURL,
@@ -105,18 +130,64 @@ async def process_ping_callback(entry: GarminPingEntry, ping_type: str,
 
     if not data:
         logger.error("Failed to fetch callback URL for user %s", user_id)
-        return
+        return None
 
     # Mark token as successfully used
     with get_db(config.db_path) as db:
         mark_token_used(db, user_id)
 
-    if ping_type == "activities":
-        await _process_activity_summaries(data, user_id, config)
-    elif ping_type == "activity_files":
-        await _process_activity_file(data, entry, user_id, config)
+    return data
+
+
+async def _process_inline_activity_summary(entry: GarminPingEntry, user_id: str,
+                                             config: AppConfig) -> None:
+    """Process an activity summary that arrived inline in the ping (no callbackURL)."""
+    activity_id = str(entry.activityId) if entry.activityId else str(entry.summaryId or "")
+    if not activity_id:
+        logger.warning("Inline activity summary missing ID for user %s, skipping", user_id)
+        return
+
+    activity_type = entry.activityType
+    manual = entry.manual or False
+    is_web_upload = entry.isWebUpload or False
+    device_name = entry.deviceName
+
+    skip_reason = None
+    if manual:
+        skip_reason = "manual activity"
+    elif is_web_upload:
+        skip_reason = "web upload"
     else:
-        logger.warning("Unknown ping type: %s", ping_type)
+        skip_reason = should_skip_activity_type(activity_type)
+
+    status = "skipped" if skip_reason else "pending"
+
+    start_time = None
+    if entry.startTimeInSeconds:
+        start_time = datetime.fromtimestamp(
+            entry.startTimeInSeconds, tz=timezone.utc
+        ).isoformat()
+
+    with get_db(config.db_path) as db:
+        upsert_activity(
+            db,
+            garmin_user_id=user_id,
+            garmin_activity_id=activity_id,
+            garmin_summary_id=str(entry.summaryId) if entry.summaryId else None,
+            activity_type=activity_type,
+            device_name=device_name,
+            manual=1 if manual else 0,
+            is_web_upload=1 if is_web_upload else 0,
+            start_time=start_time,
+            processing_status=status,
+            processing_error=skip_reason,
+        )
+
+    if skip_reason:
+        logger.info("Skipped activity %s: %s", activity_id, skip_reason)
+    else:
+        logger.info("Stored inline activity %s (type=%s, device=%s)",
+                    activity_id, activity_type, device_name)
 
 
 async def _process_activity_summaries(data: bytes, user_id: str,
@@ -251,6 +322,7 @@ async def _process_activity_file(data: bytes, entry: GarminPingEntry,
                     battery_level=device.battery_level,
                     activity_type=activity_type,
                     activity_time=activity_time,
+                    software_version=device.software_version,
                 )
 
             logger.info(
