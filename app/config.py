@@ -38,13 +38,21 @@ class AppConfig:
     garmin: GarminConfig = field(default_factory=GarminConfig)
 
 
+def _resolve_path(path: str) -> str:
+    """Resolve a relative path against the project root, not the cwd."""
+    if os.path.isabs(path):
+        return path
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(project_root, path)
+
+
 def load_config() -> AppConfig:
     """Load configuration from environment variables."""
     config = AppConfig(
-        db_path=os.environ.get("DB_PATH", "activity_battery.db"),
+        db_path=_resolve_path(os.environ.get("DB_PATH", "activity_battery.db")),
         webhook_base_url=os.environ.get("WEBHOOK_BASE_URL", "http://localhost:8000"),
         save_fit_files=os.environ.get("SAVE_FIT_FILES", "").lower() in ("true", "1", "yes"),
-        fit_files_dir=os.environ.get("FIT_FILES_DIR", "debug_fit_files"),
+        fit_files_dir=_resolve_path(os.environ.get("FIT_FILES_DIR", "debug_fit_files")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         garmin=GarminConfig(
             consumer_key=os.environ.get("GARMIN_CONSUMER_KEY", ""),

@@ -96,10 +96,7 @@ def create_auth_router(config: AppConfig) -> APIRouter:
             store_token(db, garmin_user_id, access_token, token_secret)
 
         logger.info("User %s connected successfully", garmin_user_id)
-        return {
-            "status": "connected",
-            "garmin_user_id": garmin_user_id,
-            "message": "Garmin account connected successfully",
-        }
+        # Redirect to UI with user ID
+        return RedirectResponse(url=f"/?user={garmin_user_id}")
 
     return router

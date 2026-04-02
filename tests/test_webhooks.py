@@ -4,6 +4,7 @@ Tests for Garmin webhook endpoints and activity processing.
 
 import json
 import os
+import tempfile
 import pytest
 
 from fastapi.testclient import TestClient
@@ -29,20 +30,16 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
-    """Initialize a fresh DB for each test."""
-    init_db(config.db_path)
+def setup_db(monkeypatch, tmp_path):
+    """Initialize a temp DB for each test — never touches production data."""
+    test_db = str(tmp_path / "test.db")
+    monkeypatch.setattr(config, "db_path", test_db)
+    init_db(test_db)
     # Seed a test user
-    with get_db(config.db_path) as db:
+    with get_db(test_db) as db:
         upsert_user(db, "test-user-001")
         store_token(db, "test-user-001", "fake-access-token", "fake-token-secret")
     yield
-    # Clean up tables between tests (order matters for FK constraints)
-    with get_db(config.db_path) as db:
-        db.execute("DELETE FROM device_battery_readings")
-        db.execute("DELETE FROM activities")
-        db.execute("DELETE FROM tokens")
-        db.execute("DELETE FROM users")
 
 
 class TestHealthCheck:

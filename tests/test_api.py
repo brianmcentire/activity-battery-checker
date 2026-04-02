@@ -18,17 +18,15 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
-    init_db(config.db_path)
-    with get_db(config.db_path) as db:
+def setup_db(monkeypatch, tmp_path):
+    """Initialize a temp DB for each test — never touches production data."""
+    test_db = str(tmp_path / "test.db")
+    monkeypatch.setattr(config, "db_path", test_db)
+    init_db(test_db)
+    with get_db(test_db) as db:
         upsert_user(db, "user-1")
         store_token(db, "user-1", "token", "secret")
     yield
-    with get_db(config.db_path) as db:
-        db.execute("DELETE FROM device_battery_readings")
-        db.execute("DELETE FROM activities")
-        db.execute("DELETE FROM tokens")
-        db.execute("DELETE FROM users")
 
 
 class TestUserEndpoint:

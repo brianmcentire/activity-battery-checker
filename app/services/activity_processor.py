@@ -98,13 +98,59 @@ async def process_ping_callback(entry: GarminPingEntry, ping_type: str,
         if not entry.callbackURL:
             logger.warning("Activity file ping for user %s has no callbackURL, skipping", user_id)
             return
+        # Always save the callback URL so we can retry later
+        activity_id = str(entry.activityId) if entry.activityId else None
+        if activity_id:
+            with get_db(config.db_path) as db:
+                upsert_activity(db, garmin_user_id=user_id,
+                                garmin_activity_id=activity_id,
+                                callback_url=entry.callbackURL)
         data = await _fetch_callback(entry, user_id, config)
         if not data:
+            # Mark as failed so retry is possible
+            if activity_id:
+                with get_db(config.db_path) as db:
+                    upsert_activity(db, garmin_user_id=user_id,
+                                    garmin_activity_id=activity_id,
+                                    processing_status="failed",
+                                    processing_error="Failed to fetch FIT file")
             return
         await _process_activity_file(data, entry, user_id, config)
         return
 
     logger.warning("Unknown ping type: %s", ping_type)
+
+
+async def retry_activity(activity_id: str, config: AppConfig) -> dict:
+    """Retry fetching and processing a failed/pending activity's FIT file."""
+    with get_db(config.db_path) as db:
+        act = get_activity(db, activity_id)
+
+    if not act:
+        return {"error": "Activity not found"}
+
+    user_id = act["garmin_user_id"]
+    callback_url = act.get("callback_url")
+
+    if not callback_url:
+        return {"error": "No callback URL stored — cannot retry"}
+
+    entry = GarminPingEntry(
+        userId=user_id,
+        callbackURL=callback_url,
+        activityId=int(activity_id) if activity_id.isdigit() else None,
+    )
+
+    data = await _fetch_callback(entry, user_id, config)
+    if not data:
+        return {"error": "Failed to fetch callback URL"}
+
+    await _process_activity_file(data, entry, user_id, config)
+
+    with get_db(config.db_path) as db:
+        updated = get_activity(db, activity_id)
+
+    return {"status": updated["processing_status"] if updated else "unknown"}
 
 
 async def _fetch_callback(entry: GarminPingEntry, user_id: str,

@@ -5,11 +5,14 @@ Receives Garmin webhook notifications, downloads FIT files,
 parses device/sensor battery information.
 """
 
+import hashlib
 import json
 import logging
 import sys
 
 from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import load_config
 from app.database import (
@@ -20,6 +23,7 @@ from app.database import (
 from battery_parser import parse_fit_bytes
 from app.routers.auth import create_auth_router
 from app.routers.webhooks import create_webhook_router
+from app.services.activity_processor import retry_activity
 
 config = load_config()
 
@@ -138,6 +142,7 @@ async def user_batteries(garmin_user_id: str):
                     "battery_voltage": device.get("battery_voltage"),
                     "battery_status": device.get("battery_status"),
                     "battery_level": device.get("battery_level"),
+                    "software_version": device.get("software_version"),
                     "from_activity": act["garmin_activity_id"],
                     "activity_time": act["start_time"],
                 }
@@ -225,7 +230,9 @@ async def upload_fit(request: Request,
     if not result.success:
         raise HTTPException(status_code=422, detail=f"FIT parse error: {result.error}")
 
-    activity_id = f"upload-{now_utc().replace(':', '').replace('-', '').replace(' ', '-')}"
+    # Deterministic ID from file content so re-uploads upsert rather than duplicate
+    file_hash = hashlib.sha256(body).hexdigest()[:16]
+    activity_id = f"upload-{file_hash}"
     stored = False
 
     if garmin_user_id:
@@ -236,6 +243,8 @@ async def upload_fit(request: Request,
                 db,
                 garmin_user_id=garmin_user_id,
                 garmin_activity_id=activity_id,
+                activity_type=result.activity_type,
+                start_time=result.activity_start_time,
                 processing_status="completed",
                 parse_result=json.dumps(result.to_dict()),
             )
@@ -253,12 +262,16 @@ async def upload_fit(request: Request,
                     battery_voltage=device.battery_voltage,
                     battery_status=device.battery_status,
                     battery_level=device.battery_level,
+                    activity_type=result.activity_type,
+                    activity_time=result.activity_start_time,
                     software_version=device.software_version,
                 )
             stored = True
 
     return {
         "activity_id": activity_id,
+        "activity_type": result.activity_type,
+        "activity_start_time": result.activity_start_time,
         "total_devices": result.total_devices,
         "devices_with_battery": result.devices_with_battery,
         "has_head_unit": result.has_head_unit,
@@ -266,3 +279,18 @@ async def upload_fit(request: Request,
         "devices": [d.to_dict() for d in result.devices],
         "stored": stored,
     }
+
+
+@app.post("/activities/{activity_id}/retry")
+async def retry(activity_id: str):
+    """Retry fetching and processing a failed activity's FIT file."""
+    result = await retry_activity(activity_id, config)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.get("/ui")
+async def ui():
+    """Serve the single-page dashboard."""
+    return FileResponse("static/index.html")

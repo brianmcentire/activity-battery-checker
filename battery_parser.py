@@ -220,6 +220,17 @@ def resolve_device_name(info: dict, device_index) -> str:
         if name:
             return name
 
+    # Non-Garmin manufacturer with ANT+ device type — use "Manufacturer Type" format
+    manufacturer = info.get('manufacturer')
+    if manufacturer and 'antplus_device_type' in info:
+        mfr_str = str(manufacturer).replace('_', ' ').title()
+        # Drop common suffixes for cleaner names
+        for suffix in (' Electro', ' Electronics'):
+            if mfr_str.endswith(suffix):
+                mfr_str = mfr_str[:-len(suffix)]
+        ant_type = str(info['antplus_device_type']).replace('_', ' ').title()
+        return f'{mfr_str} {ant_type}'
+
     if 'antplus_device_type' in info:
         return str(info['antplus_device_type']).replace('_', ' ').title()
 
@@ -257,9 +268,11 @@ class ParseResult:
     total_devices: int = 0
     has_external_sensors: bool = False
     has_head_unit: bool = False
+    activity_start_time: Optional[str] = None
+    activity_type: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             'success': self.success,
             'error': self.error,
             'devices': [d.to_dict() for d in self.devices],
@@ -268,14 +281,27 @@ class ParseResult:
             'has_external_sensors': self.has_external_sensors,
             'has_head_unit': self.has_head_unit,
         }
+        if self.activity_start_time:
+            d['activity_start_time'] = self.activity_start_time
+        if self.activity_type:
+            d['activity_type'] = self.activity_type
+        return d
 
 
-def _extract_raw_devices(fit_reader) -> dict:
-    """Extract raw device data from a FIT reader."""
+def _extract_raw_devices(fit_reader) -> tuple[dict, dict]:
+    """Extract raw device data and session metadata from a FIT reader."""
     devices = {}
+    session_meta = {}
     for frame in fit_reader:
         if not isinstance(frame, fitdecode.FitDataMessage):
             continue
+
+        if frame.name == 'session' and not session_meta:
+            for f in frame.fields:
+                if f.name == 'start_time' and f.value is not None:
+                    session_meta['start_time'] = f.value.isoformat() if hasattr(f.value, 'isoformat') else str(f.value)
+                elif f.name == 'sport' and f.value is not None:
+                    session_meta['sport'] = str(f.value).upper()
 
         if frame.name == 'device_info':
             device_data = {}
@@ -293,7 +319,7 @@ def _extract_raw_devices(fit_reader) -> dict:
                 else:
                     devices[device_index].update(device_data)
 
-    return devices
+    return devices, session_meta
 
 
 def _build_device_info(device_index, raw_info: dict) -> DeviceInfo:
@@ -319,7 +345,13 @@ def _build_device_info(device_index, raw_info: dict) -> DeviceInfo:
     batt_status = format_battery_status(batt_status_raw) if batt_status_raw is not None else None
 
     sw_version = raw_info.get('software_version')
-    sw_version_str = str(sw_version) if sw_version is not None else None
+    # ANT+ sensors from non-Garmin manufacturers often report the ANT+ profile
+    # version (e.g., 1.0) rather than actual firmware — suppress these
+    is_garmin = str(manufacturer).lower() in ('garmin', 'favero_electronics') if manufacturer else False
+    if sw_version is not None and not is_garmin and sw_version in (1.0, 0.0):
+        sw_version_str = None
+    else:
+        sw_version_str = str(sw_version) if sw_version is not None else None
 
     source_type = raw_info.get('source_type')
     source_type_str = str(source_type) if source_type is not None else None
@@ -345,25 +377,25 @@ def parse_fit_file(filepath: str) -> ParseResult:
     """Parse a FIT file from a file path and extract device battery information."""
     try:
         with fitdecode.FitReader(filepath) as fit:
-            raw_devices = _extract_raw_devices(fit)
+            raw_devices, session_meta = _extract_raw_devices(fit)
     except Exception as e:
         return ParseResult(success=False, error=str(e))
 
-    return _build_parse_result(raw_devices)
+    return _build_parse_result(raw_devices, session_meta)
 
 
 def parse_fit_bytes(data: bytes) -> ParseResult:
     """Parse FIT data from bytes (in-memory) and extract device battery information."""
     try:
         with fitdecode.FitReader(io.BytesIO(data)) as fit:
-            raw_devices = _extract_raw_devices(fit)
+            raw_devices, session_meta = _extract_raw_devices(fit)
     except Exception as e:
         return ParseResult(success=False, error=str(e))
 
-    return _build_parse_result(raw_devices)
+    return _build_parse_result(raw_devices, session_meta)
 
 
-def _build_parse_result(raw_devices: dict) -> ParseResult:
+def _build_parse_result(raw_devices: dict, session_meta: dict = None) -> ParseResult:
     """Build a ParseResult from raw extracted device data."""
     devices = []
     for idx, raw in sorted(raw_devices.items(), key=lambda x: str(x[0])):
@@ -378,6 +410,7 @@ def _build_parse_result(raw_devices: dict) -> ParseResult:
         for d in devices
     )
 
+    meta = session_meta or {}
     return ParseResult(
         success=True,
         devices=devices,
@@ -385,6 +418,8 @@ def _build_parse_result(raw_devices: dict) -> ParseResult:
         total_devices=len(devices),
         has_external_sensors=has_external_sensors,
         has_head_unit=has_head_unit,
+        activity_start_time=meta.get('start_time'),
+        activity_type=meta.get('sport'),
     )
 
 

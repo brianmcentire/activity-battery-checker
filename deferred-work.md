@@ -26,11 +26,20 @@ Push notifications (Pushover, email, etc.) when a device battery drops below a t
 
 ## Infrastructure
 
-### Deployment options
-Current plan: ngrok for initial proof of concept (free, random URL changes each restart). When ready for stable hosting:
-- **EC2/Lightsail** — cheapest path, no code changes, run FastAPI as-is (~$3.50/mo)
-- **Lambda + API Gateway** — free at low volume, but requires Mangum adapter and replacing SQLite with DynamoDB
-- **ngrok paid** ($8/mo) — stable subdomain, keeps local dev workflow
+### Production deployment (decided: API Gateway → SQS → Lambda + DynamoDB)
+Architecture: API Gateway receives Garmin webhook pings (always-on, multi-AZ by default), pushes to SQS for resilient processing, Lambda processes from queue, DynamoDB for storage. Essentially free at small scale (all within AWS free tier). SQS provides automatic retries and dead letter queue so no pings are silently lost.
+
+**Migration path:**
+1. Build UI against SQLite locally (current phase)
+2. Add database abstraction layer (`SqliteStore` / `DynamoStore` behind common interface) — config determines which loads
+3. Deploy to Lambda + DynamoDB when ready for always-on
+4. Keep local dev on SQLite forever — no LocalStack or DynamoDB Local needed
+
+**Code changes needed for prod:**
+- Database abstraction layer (wrap existing `get_db`/`upsert_activity`/etc. behind interface)
+- Mangum adapter for Lambda (one-liner wrapper around FastAPI)
+- SQS message handling for processing Lambda (locally, webhook endpoints process inline as they do now)
+- DynamoDB implementation of the store interface
 
 ### OAuth 2 migration
 Execute migration when Garmin enables OAuth 2 for the app. Design is already migration-safe (userId-keyed, abstracted token storage). See `plan.md` migration section.

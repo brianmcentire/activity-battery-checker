@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Activity Battery Checker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<div x-data="app()" x-init="init()" class="max-w-4xl mx-auto px-4 py-8">
+
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-8">
+        <div>
+            <h1 class="text-2xl font-bold text-white">Activity Battery Checker</h1>
+            <p class="text-gray-400 text-sm mt-1">Monitor your Garmin sensor batteries</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <template x-if="userId">
+                <div class="flex items-center gap-3">
+                    <span class="text-xs text-gray-500 font-mono" x-text="userId.slice(0,8)+'...'"></span>
+                    <button @click="disconnect()" class="text-xs text-gray-500 hover:text-red-400 transition">Disconnect</button>
+                </div>
+            </template>
+            <template x-if="!userId">
+                <a href="/auth/connect"
+                   class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+                    Connect Garmin
+                </a>
+            </template>
+        </div>
+    </div>
+
+    <!-- Not connected state -->
+    <template x-if="!userId">
+        <div class="text-center py-20">
+            <div class="text-6xl mb-4">&#9889;</div>
+            <h2 class="text-xl font-semibold text-gray-300 mb-2">No Garmin account connected</h2>
+            <p class="text-gray-500 mb-6">Connect your Garmin account to see battery data from your rides, or upload a FIT file directly.</p>
+            <div class="flex justify-center gap-4">
+                <a href="/auth/connect"
+                   class="bg-blue-600 hover:bg-blue-500 text-white font-medium px-6 py-2.5 rounded-lg transition">
+                    Connect Garmin
+                </a>
+                <button @click="showUpload = true"
+                        class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium px-6 py-2.5 rounded-lg transition border border-gray-700">
+                    Upload FIT File
+                </button>
+            </div>
+        </div>
+    </template>
+
+    <!-- Connected state -->
+    <template x-if="userId">
+        <div>
+            <!-- Action bar -->
+            <div class="flex gap-3 mb-6">
+                <button @click="refresh()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm px-4 py-2 rounded-lg transition border border-gray-700">
+                    Refresh
+                </button>
+                <button @click="showUpload = !showUpload" class="bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm px-4 py-2 rounded-lg transition border border-gray-700">
+                    Upload FIT
+                </button>
+            </div>
+
+            <!-- Device cards -->
+            <div x-show="devices.length > 0" class="mb-8">
+                <h2 class="text-lg font-semibold text-gray-300 mb-4">Devices</h2>
+                <div class="grid gap-4 sm:grid-cols-2">
+                    <template x-for="device in devices" :key="device.serial_number || device.device_name">
+                        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+                            <div class="flex items-start justify-between mb-3">
+                                <div>
+                                    <h3 class="font-semibold text-white" x-text="device.device_name"></h3>
+                                    <span class="text-xs text-gray-500 capitalize" x-text="device.classification.replace('_', ' ')"></span>
+                                </div>
+                                <span class="text-xs font-mono px-2 py-1 rounded-full"
+                                      :class="statusColor(device.battery_status)"
+                                      x-text="device.battery_status"></span>
+                            </div>
+                            <div class="flex items-end gap-4">
+                                <template x-if="device.battery_voltage">
+                                    <div>
+                                        <div class="text-2xl font-bold text-white" x-text="device.battery_voltage.toFixed(2) + 'V'"></div>
+                                        <div class="text-xs text-gray-500">Voltage</div>
+                                    </div>
+                                </template>
+                                <template x-if="device.battery_level !== null && device.battery_level !== undefined">
+                                    <div>
+                                        <div class="text-2xl font-bold text-white" x-text="device.battery_level + '%'"></div>
+                                        <div class="text-xs text-gray-500">Level</div>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="mt-3 text-xs text-gray-600">
+                                <span x-text="device.manufacturer"></span>
+                                <template x-if="device.software_version">
+                                    <span x-text="' \u2022 fw ' + device.software_version"></span>
+                                </template>
+                                <template x-if="device.activity_time">
+                                    <span x-text="' \u2022 ' + formatTime(device.activity_time)"></span>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- Battery history chart -->
+            <div x-show="chartVisible" class="mb-8">
+                <h2 class="text-lg font-semibold text-gray-300 mb-4">Voltage History</h2>
+                <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+                    <canvas x-ref="chartCanvas" height="250"></canvas>
+                </div>
+            </div>
+
+            <!-- Recent activities -->
+            <div x-show="activities.length > 0">
+                <h2 class="text-lg font-semibold text-gray-300 mb-4">Recent Activities</h2>
+                <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b border-gray-800 text-gray-500 text-xs uppercase">
+                                <th class="text-left px-4 py-3 font-medium">Activity</th>
+                                <th class="text-left px-4 py-3 font-medium">Device</th>
+                                <th class="text-left px-4 py-3 font-medium">Status</th>
+                                <th class="text-left px-4 py-3 font-medium">Time</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="act in activities" :key="act.garmin_activity_id">
+                                <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
+                                    <td class="px-4 py-3 text-gray-300" x-text="formatActivityType(act.activity_type)"></td>
+                                    <td class="px-4 py-3 text-gray-400" x-text="act.device_name || '—'"></td>
+                                    <td class="px-4 py-3 flex items-center gap-2">
+                                        <span class="text-xs font-mono px-2 py-0.5 rounded-full"
+                                              :class="act.processing_status === 'completed' ? 'bg-green-900/50 text-green-400' : act.processing_status === 'skipped' ? 'bg-yellow-900/50 text-yellow-400' : act.processing_status === 'failed' ? 'bg-red-900/50 text-red-400' : 'bg-gray-800 text-gray-400'"
+                                              x-text="act.processing_status"></span>
+                                        <template x-if="act.processing_status === 'pending' || act.processing_status === 'failed'">
+                                            <button @click="retryActivity(act.garmin_activity_id)"
+                                                    class="text-xs text-blue-400 hover:text-blue-300 transition">retry</button>
+                                        </template>
+                                    </td>
+                                    <td class="px-4 py-3 text-gray-500 text-xs" x-text="formatTime(act.start_time)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Empty state -->
+            <div x-show="devices.length === 0 && !loading" class="text-center py-12">
+                <p class="text-gray-500">No battery data yet. Upload a FIT file or wait for webhook data from Garmin.</p>
+            </div>
+        </div>
+    </template>
+
+    <!-- Upload modal -->
+    <div x-show="showUpload" x-cloak
+         class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+         @click.self="showUpload = false">
+        <div class="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-md mx-4">
+            <h3 class="text-lg font-semibold text-white mb-4">Upload FIT File</h3>
+            <div class="border-2 border-dashed border-gray-700 rounded-xl p-8 text-center mb-4"
+                 :class="dragOver ? 'border-blue-500 bg-blue-500/10' : ''"
+                 @dragover.prevent="dragOver = true"
+                 @dragleave="dragOver = false"
+                 @drop.prevent="handleDrop($event)">
+                <input type="file" accept=".fit" @change="handleFileSelect($event)" class="hidden" x-ref="fileInput">
+                <p class="text-gray-400 mb-2">Drag & drop a .fit file here</p>
+                <p class="text-gray-600 text-sm mb-3">or</p>
+                <button @click="$refs.fileInput.click()"
+                        class="bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm px-4 py-2 rounded-lg transition border border-gray-700">
+                    Choose File
+                </button>
+            </div>
+            <div x-show="uploadResult" class="bg-gray-800 rounded-lg p-4 mb-4 text-sm">
+                <div class="flex items-center gap-2 mb-2">
+                    <span class="text-green-400 font-semibold">Parsed</span>
+                    <span class="text-gray-400" x-text="uploadResult?.devices_with_battery + ' devices with battery'"></span>
+                </div>
+                <template x-for="dev in (uploadResult?.devices || []).filter(d => d.has_battery_info)">
+                    <div class="flex justify-between text-gray-300 py-1">
+                        <span x-text="dev.device_name"></span>
+                        <span>
+                            <template x-if="dev.battery_voltage">
+                                <span x-text="dev.battery_voltage.toFixed(2) + 'V'"></span>
+                            </template>
+                            <template x-if="dev.battery_level !== null && dev.battery_level !== undefined">
+                                <span x-text="dev.battery_level + '%'"></span>
+                            </template>
+                            <span class="ml-2 text-xs" :class="statusColor(dev.battery_status)" x-text="dev.battery_status"></span>
+                        </span>
+                    </div>
+                </template>
+            </div>
+            <div x-show="uploadError" class="bg-red-900/30 border border-red-800 rounded-lg p-3 mb-4 text-sm text-red-400" x-text="uploadError"></div>
+            <div class="flex justify-end">
+                <button @click="showUpload = false; uploadResult = null; uploadError = null"
+                        class="text-sm text-gray-400 hover:text-gray-300 transition">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div x-show="loading" x-cloak class="fixed inset-0 bg-black/30 flex items-center justify-center z-40">
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-6">
+            <div class="animate-spin w-8 h-8 border-2 border-gray-600 border-t-blue-400 rounded-full mx-auto"></div>
+            <p class="text-gray-400 text-sm mt-3">Loading...</p>
+        </div>
+    </div>
+</div>
+
+<script>
+const CHART_COLORS = [
+    '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
+];
+
+function app() {
+    return {
+        userId: null,
+        devices: [],
+        activities: [],
+        history: {},
+        loading: false,
+        showUpload: false,
+        uploadResult: null,
+        uploadError: null,
+        dragOver: false,
+        chart: null,
+        chartVisible: false,
+
+        init() {
+            // Check URL params first (from OAuth callback)
+            const params = new URLSearchParams(window.location.search);
+            const urlUser = params.get('user');
+            if (urlUser) {
+                this.userId = urlUser;
+                localStorage.setItem('garmin_user_id', urlUser);
+                // Clean URL
+                window.history.replaceState({}, '', '/ui');
+            } else {
+                this.userId = localStorage.getItem('garmin_user_id');
+            }
+
+            if (this.userId) {
+                this.refresh();
+            }
+        },
+
+        disconnect() {
+            this.userId = null;
+            this.devices = [];
+            this.activities = [];
+            this.history = {};
+            localStorage.removeItem('garmin_user_id');
+            if (this.chart) { this.chart.destroy(); this.chart = null; }
+        },
+
+        async refresh() {
+            if (!this.userId) return;
+            this.loading = true;
+            try {
+                const [batteries, acts, hist] = await Promise.all([
+                    fetch(`/users/${this.userId}/batteries`).then(r => r.json()),
+                    fetch(`/users/${this.userId}/activities?limit=20`).then(r => r.json()),
+                    fetch(`/users/${this.userId}/battery-history`).then(r => r.json()),
+                ]);
+                this.devices = batteries.devices || [];
+                this.activities = acts.activities || [];
+                this.history = hist.devices || {};
+                this.$nextTick(() => this.renderChart());
+            } catch (e) {
+                console.error('Failed to load data:', e);
+            }
+            this.loading = false;
+        },
+
+        renderChart() {
+            if (this.chart) { this.chart.destroy(); this.chart = null; }
+
+            // Check if we have any voltage data to chart
+            let hasVoltageData = false;
+            for (const readings of Object.values(this.history)) {
+                if (readings.some(r => r.battery_voltage != null)) {
+                    hasVoltageData = true;
+                    break;
+                }
+            }
+            this.chartVisible = hasVoltageData;
+            if (!hasVoltageData) return;
+
+            // Wait for canvas to be visible in DOM before rendering
+            this.$nextTick(() => {
+                const canvas = this.$refs.chartCanvas;
+                if (!canvas) return;
+                this._drawChart(canvas);
+            });
+        },
+
+        _drawChart(canvas) {
+            const deviceNames = {};
+            for (const dev of this.devices) {
+                if (dev.serial_number) deviceNames[dev.serial_number] = dev.device_name;
+            }
+
+            const datasets = [];
+            let colorIdx = 0;
+            for (const [serial, readings] of Object.entries(this.history)) {
+                const voltageReadings = readings.filter(r => r.battery_voltage != null);
+                if (voltageReadings.length === 0) continue;
+
+                voltageReadings.sort((a, b) => {
+                    const ta = a.activity_time || '';
+                    const tb = b.activity_time || '';
+                    return ta.localeCompare(tb);
+                });
+
+                const label = deviceNames[serial] || `Device ${serial.slice(0,8)}`;
+                const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
+                colorIdx++;
+
+                datasets.push({
+                    label,
+                    data: voltageReadings.map(r => ({
+                        x: r.activity_time ? new Date(r.activity_time).getTime() : Date.now(),
+                        y: r.battery_voltage
+                    })),
+                    borderColor: color,
+                    backgroundColor: color + '20',
+                    borderWidth: 2,
+                    pointRadius: 5,
+                    pointHoverRadius: 7,
+                    tension: 0.3,
+                });
+            }
+
+            if (datasets.length === 0) return;
+
+            const formatDate = (ms) => {
+                const d = new Date(ms);
+                return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            };
+
+            this.chart = new Chart(canvas, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#9ca3af', font: { size: 12 } }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                title: ctx => formatDate(ctx[0].parsed.x),
+                                label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)}V`
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'linear',
+                            ticks: {
+                                color: '#6b7280',
+                                font: { size: 10 },
+                                maxTicksLimit: 8,
+                                callback: val => formatDate(val)
+                            },
+                            grid: { color: '#1f2937' }
+                        },
+                        y: {
+                            title: { display: true, text: 'Voltage (V)', color: '#9ca3af' },
+                            ticks: { color: '#6b7280' },
+                            grid: { color: '#1f2937' }
+                        }
+                    }
+                }
+            });
+        },
+
+        async retryActivity(activityId) {
+            try {
+                const resp = await fetch(`/activities/${activityId}/retry`, { method: 'POST' });
+                if (resp.ok) {
+                    await this.refresh();
+                } else {
+                    const err = await resp.json();
+                    alert(err.detail || 'Retry failed');
+                }
+            } catch (e) {
+                alert('Retry failed: ' + e.message);
+            }
+        },
+
+        async handleDrop(event) {
+            this.dragOver = false;
+            const file = event.dataTransfer.files[0];
+            if (file) await this.uploadFile(file);
+        },
+
+        async handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) await this.uploadFile(file);
+            event.target.value = '';  // reset so same file can be re-selected
+        },
+
+        async uploadFile(file) {
+            this.uploadResult = null;
+            this.uploadError = null;
+
+            if (!file.name.endsWith('.fit')) {
+                this.uploadError = 'Please select a .fit file';
+                return;
+            }
+
+            try {
+                const bytes = await file.arrayBuffer();
+                const url = this.userId
+                    ? `/upload/fit?garmin_user_id=${this.userId}`
+                    : '/upload/fit';
+
+                const resp = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream' },
+                    body: bytes,
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    this.uploadError = err.detail || 'Upload failed';
+                    return;
+                }
+
+                this.uploadResult = await resp.json();
+                // Refresh dashboard if stored
+                if (this.uploadResult.stored && this.userId) {
+                    await this.refresh();
+                }
+            } catch (e) {
+                this.uploadError = 'Upload failed: ' + e.message;
+            }
+        },
+
+        statusColor(status) {
+            if (!status) return 'bg-gray-800 text-gray-400';
+            switch (status.toLowerCase()) {
+                case 'ok': case 'good': case 'new': return 'bg-green-900/50 text-green-400';
+                case 'low': return 'bg-yellow-900/50 text-yellow-400';
+                case 'critical': return 'bg-red-900/50 text-red-400';
+                default: return 'bg-gray-800 text-gray-400';
+            }
+        },
+
+        formatActivityType(type) {
+            if (!type) return '—';
+            return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        },
+
+        formatTime(iso) {
+            if (!iso) return '—';
+            try {
+                const d = new Date(iso);
+                return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                     + ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+            } catch { return iso; }
+        }
+    };
+}
+</script>
+</body>
+</html>
