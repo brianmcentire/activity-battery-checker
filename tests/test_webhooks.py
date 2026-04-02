@@ -4,7 +4,6 @@ Tests for Garmin webhook endpoints and activity processing.
 
 import json
 import os
-import tempfile
 import pytest
 
 from fastapi.testclient import TestClient

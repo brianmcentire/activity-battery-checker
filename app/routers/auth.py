@@ -8,6 +8,7 @@ Flow:
 """
 
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -21,8 +22,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 # In-memory store for pending OAuth 1 request tokens.
-# In production this should use a short-lived cache or session store.
-_pending_tokens: dict[str, dict] = {}
+# Entries expire after 24 hours to prevent unbounded growth.
+_TOKEN_TTL = 86400  # seconds
+_pending_tokens: dict[str, tuple[dict, float]] = {}  # token -> (data, timestamp)
+
+
+def _store_pending(key: str, data: dict) -> None:
+    _evict_expired()
+    _pending_tokens[key] = (data, time.monotonic())
+
+
+def _pop_pending(key: str) -> dict | None:
+    entry = _pending_tokens.pop(key, None)
+    if entry is None:
+        return None
+    data, ts = entry
+    if time.monotonic() - ts > _TOKEN_TTL:
+        return None
+    return data
+
+
+def _evict_expired() -> None:
+    now = time.monotonic()
+    expired = [k for k, (_, ts) in _pending_tokens.items() if now - ts > _TOKEN_TTL]
+    for k in expired:
+        del _pending_tokens[k]
 
 
 def create_auth_router(config: AppConfig) -> APIRouter:
@@ -45,7 +69,7 @@ def create_auth_router(config: AppConfig) -> APIRouter:
             raise HTTPException(status_code=502, detail="Failed to get request token from Garmin")
 
         request_token = token["oauth_token"]
-        _pending_tokens[request_token] = token
+        _store_pending(request_token, token)
 
         authorize_url = garmin_client.get_authorize_url(request_token)
         logger.info("Redirecting user to Garmin authorization: %s", authorize_url)
@@ -60,7 +84,7 @@ def create_auth_router(config: AppConfig) -> APIRouter:
                 detail="Missing oauth_token or oauth_verifier"
             )
 
-        pending = _pending_tokens.pop(oauth_token, None)
+        pending = _pop_pending(oauth_token)
         if not pending:
             raise HTTPException(
                 status_code=400,

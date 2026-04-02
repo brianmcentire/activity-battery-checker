@@ -8,11 +8,11 @@ parses device/sensor battery information.
 import hashlib
 import json
 import logging
+import os
 import sys
 
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from app.config import load_config
 from app.database import (
@@ -38,8 +38,9 @@ for uv_logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
     uv_logger.propagate = True
 logger = logging.getLogger(__name__)
 
-# Initialize database
-init_db(config.db_path)
+# Initialize database (skipped during test collection — tests set their own db_path)
+if not os.environ.get("PYTEST_CURRENT_TEST"):
+    init_db(config.db_path)
 
 # Create FastAPI app
 app = FastAPI(
@@ -239,11 +240,13 @@ async def upload_fit(request: Request,
         with get_db(config.db_path) as db:
             # Ensure user exists
             upsert_user(db, garmin_user_id)
+            head_unit = next((d.device_name for d in result.devices if d.classification == 'head_unit'), None)
             upsert_activity(
                 db,
                 garmin_user_id=garmin_user_id,
                 garmin_activity_id=activity_id,
                 activity_type=result.activity_type,
+                device_name=head_unit,
                 start_time=result.activity_start_time,
                 processing_status="completed",
                 parse_result=json.dumps(result.to_dict()),

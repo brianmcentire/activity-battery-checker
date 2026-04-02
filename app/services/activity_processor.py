@@ -332,22 +332,25 @@ async def _process_activity_file(data: bytes, entry: GarminPingEntry,
     # Parse the FIT file in-memory
     result = parse_fit_bytes(data)
 
-    # Look up activity metadata
-    activity_type = None
-    activity_time = None
-    with get_db(config.db_path) as db:
-        act = get_activity(db, activity_id)
-        if act:
-            activity_type = act.get("activity_type")
-            activity_time = act.get("start_time")
+    # Prefer metadata from the FIT file itself; fall back to DB (from summary ping)
+    activity_type = result.activity_type
+    activity_time = result.activity_start_time
+    if not activity_type or not activity_time:
+        with get_db(config.db_path) as db:
+            act = get_activity(db, activity_id)
+            if act:
+                activity_type = activity_type or act.get("activity_type")
+                activity_time = activity_time or act.get("start_time")
 
     # Store parse result and battery readings
     with get_db(config.db_path) as db:
         if result.success:
+            head_unit = next((d.device_name for d in result.devices if d.classification == 'head_unit'), None)
             upsert_activity(
                 db,
                 garmin_user_id=user_id,
                 garmin_activity_id=activity_id,
+                device_name=head_unit,
                 processing_status="completed",
                 parse_result=json.dumps(result.to_dict()),
             )
