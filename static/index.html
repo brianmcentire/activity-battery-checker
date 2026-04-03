@@ -325,16 +325,16 @@ function app() {
         renderChart() {
             if (this.chart) { this.chart.destroy(); this.chart = null; }
 
-            // Check if we have any voltage data to chart
-            let hasVoltageData = false;
+            // Check if we have any chartable data (voltage or level)
+            let hasChartData = false;
             for (const readings of Object.values(this.history)) {
-                if (readings.some(r => r.battery_voltage != null)) {
-                    hasVoltageData = true;
+                if (readings.some(r => r.battery_voltage != null || r.battery_level != null)) {
+                    hasChartData = true;
                     break;
                 }
             }
-            this.chartVisible = hasVoltageData;
-            if (!hasVoltageData) return;
+            this.chartVisible = hasChartData;
+            if (!hasChartData) return;
 
             // Wait for canvas to be visible in DOM before rendering
             this.$nextTick(() => {
@@ -369,37 +369,75 @@ function app() {
             const rangeFrom = this.chartFrom ? new Date(this.chartFrom).getTime() : null;
             const rangeTo = this.chartTo ? new Date(this.chartTo + 'T23:59:59').getTime() : null;
 
+            const filterByRange = (list) => {
+                let filtered = list;
+                if (rangeFrom) filtered = filtered.filter(r => r.activity_time && new Date(r.activity_time).getTime() >= rangeFrom);
+                if (rangeTo) filtered = filtered.filter(r => r.activity_time && new Date(r.activity_time).getTime() <= rangeTo);
+                return filtered;
+            };
+
+            const sortByTime = (list) => list.sort((a, b) => (a.activity_time || '').localeCompare(b.activity_time || ''));
+
             const datasets = [];
             let colorIdx = 0;
+            let hasVoltage = false;
+            let hasLevel = false;
+
             for (const [serial, readings] of Object.entries(this.history)) {
-                let voltageReadings = readings.filter(r => r.battery_voltage != null);
-                if (rangeFrom) voltageReadings = voltageReadings.filter(r => r.activity_time && new Date(r.activity_time).getTime() >= rangeFrom);
-                if (rangeTo) voltageReadings = voltageReadings.filter(r => r.activity_time && new Date(r.activity_time).getTime() <= rangeTo);
-                if (voltageReadings.length === 0) continue;
-
-                voltageReadings.sort((a, b) => {
-                    const ta = a.activity_time || '';
-                    const tb = b.activity_time || '';
-                    return ta.localeCompare(tb);
-                });
-
                 const label = deviceNames[serial] || `Device ${serial.slice(0,8)}`;
                 const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
-                colorIdx++;
 
-                datasets.push({
-                    label,
-                    data: voltageReadings.map(r => ({
-                        x: r.activity_time ? new Date(r.activity_time).getTime() : Date.now(),
-                        y: r.battery_voltage
-                    })),
-                    borderColor: color,
-                    backgroundColor: color + '20',
-                    borderWidth: 2,
-                    pointRadius: 5,
-                    pointHoverRadius: 7,
-                    tension: 0.3,
-                });
+                // Voltage dataset
+                const voltageReadings = sortByTime(filterByRange(readings.filter(r => r.battery_voltage != null)));
+                if (voltageReadings.length > 0) {
+                    hasVoltage = true;
+                    datasets.push({
+                        label,
+                        yAxisID: 'y',
+                        data: voltageReadings.map(r => ({
+                            x: new Date(r.activity_time).getTime(),
+                            y: r.battery_voltage
+                        })),
+                        borderColor: color,
+                        backgroundColor: color,
+                        pointBackgroundColor: color,
+                        borderWidth: 2,
+                        pointRadius: 5,
+                        pointHoverRadius: 7,
+                        pointStyle: 'circle',
+                        fill: false,
+                        tension: 0.3,
+                    });
+                }
+
+                // Level dataset (only for devices that don't report voltage)
+                const hasVoltageForDevice = readings.some(r => r.battery_voltage != null);
+                if (!hasVoltageForDevice) {
+                    const levelReadings = sortByTime(filterByRange(readings.filter(r => r.battery_level != null)));
+                    if (levelReadings.length > 0) {
+                        hasLevel = true;
+                        datasets.push({
+                            label: label + ' (%)',
+                            yAxisID: 'yLevel',
+                            data: levelReadings.map(r => ({
+                                x: new Date(r.activity_time).getTime(),
+                                y: r.battery_level
+                            })),
+                            borderColor: color,
+                            backgroundColor: color,
+                            pointBackgroundColor: color,
+                            borderWidth: 2,
+                            borderDash: [6, 3],
+                            pointRadius: 5,
+                            pointHoverRadius: 7,
+                            pointStyle: 'rectRot',
+                            fill: false,
+                            tension: 0.3,
+                        });
+                    }
+                }
+
+                colorIdx++;
             }
 
             if (datasets.length === 0) return;
@@ -409,6 +447,39 @@ function app() {
                 return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
             };
 
+            const scales = {
+                x: {
+                    type: 'linear',
+                    ticks: {
+                        color: '#6b7280',
+                        font: { size: 10 },
+                        maxTicksLimit: 8,
+                        callback: val => formatDate(val)
+                    },
+                    grid: { color: '#1f2937' }
+                },
+            };
+
+            if (hasVoltage) {
+                scales.y = {
+                    position: 'left',
+                    title: { display: true, text: 'Voltage (V)', color: '#9ca3af' },
+                    ticks: { color: '#6b7280' },
+                    grid: { color: '#1f2937' },
+                };
+            }
+
+            if (hasLevel) {
+                scales.yLevel = {
+                    position: hasVoltage ? 'right' : 'left',
+                    title: { display: true, text: 'Level (%)', color: '#9ca3af' },
+                    min: 0,
+                    max: 100,
+                    ticks: { color: '#6b7280' },
+                    grid: { drawOnChartArea: !hasVoltage, color: '#1f2937' },
+                };
+            }
+
             this.chart = new Chart(canvas, {
                 type: 'line',
                 data: { datasets },
@@ -417,32 +488,19 @@ function app() {
                     maintainAspectRatio: false,
                     plugins: {
                         legend: {
-                            labels: { color: '#9ca3af', font: { size: 12 } }
+                            labels: { color: '#9ca3af', font: { size: 12 }, usePointStyle: true, pointStyleWidth: 10 }
                         },
                         tooltip: {
                             callbacks: {
                                 title: ctx => formatDate(ctx[0].parsed.x),
-                                label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)}V`
+                                label: ctx => {
+                                    const isLevel = ctx.dataset.yAxisID === 'yLevel';
+                                    return `${ctx.dataset.label}: ${isLevel ? ctx.parsed.y + '%' : ctx.parsed.y.toFixed(3) + 'V'}`;
+                                }
                             }
                         }
                     },
-                    scales: {
-                        x: {
-                            type: 'linear',
-                            ticks: {
-                                color: '#6b7280',
-                                font: { size: 10 },
-                                maxTicksLimit: 8,
-                                callback: val => formatDate(val)
-                            },
-                            grid: { color: '#1f2937' }
-                        },
-                        y: {
-                            title: { display: true, text: 'Voltage (V)', color: '#9ca3af' },
-                            ticks: { color: '#6b7280' },
-                            grid: { color: '#1f2937' }
-                        }
-                    }
+                    scales,
                 }
             });
         },
