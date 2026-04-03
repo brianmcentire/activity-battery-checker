@@ -211,6 +211,16 @@ def get_token(db: sqlite3.Connection, garmin_user_id: str,
     return dict(row) if row else None
 
 
+def get_user_id_by_access_token(db: sqlite3.Connection, access_token: str,
+                                auth_mode: str = "oauth1") -> str | None:
+    """Look up a garmin_user_id by access token — used to detect re-auth with same token."""
+    row = db.execute(
+        "SELECT garmin_user_id FROM tokens WHERE access_token = ? AND auth_mode = ?",
+        (access_token, auth_mode)
+    ).fetchone()
+    return row["garmin_user_id"] if row else None
+
+
 def mark_token_used(db: sqlite3.Connection, garmin_user_id: str,
                     auth_mode: str = "oauth1") -> None:
     """Update last successful use timestamp."""

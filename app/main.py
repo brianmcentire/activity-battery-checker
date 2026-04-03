@@ -296,4 +296,7 @@ async def retry(activity_id: str):
 @app.get("/ui")
 async def ui():
     """Serve the single-page dashboard."""
-    return FileResponse("static/index.html")
+    return FileResponse(
+        "static/index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
