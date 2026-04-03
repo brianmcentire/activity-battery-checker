@@ -12,13 +12,20 @@ import os
 import sys
 
 from fastapi import FastAPI, HTTPException, Request, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from app.config import load_config
 from app.database import (
-    init_db, get_db, get_recent_activities, get_user,
-    get_device_history, get_all_device_histories,
-    upsert_user, upsert_activity, store_battery_reading, now_utc,
+    init_db,
+    get_db,
+    get_recent_activities,
+    get_user,
+    get_device_history,
+    get_all_device_histories,
+    upsert_user,
+    upsert_activity,
+    store_battery_reading,
+    now_utc,
 )
 from battery_parser import parse_fit_bytes
 from app.routers.auth import create_auth_router
@@ -54,9 +61,23 @@ app.include_router(create_auth_router(config))
 app.include_router(create_webhook_router(config))
 
 
+def dashboard_response() -> FileResponse:
+    """Serve the single-page dashboard with no-cache headers."""
+    return FileResponse(
+        "static/index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
 @app.get("/")
 async def root():
-    """Health check endpoint."""
+    """Serve the single-page dashboard."""
+    return dashboard_response()
+
+
+@app.get("/healthz")
+async def healthz():
+    """Machine-readable health check endpoint."""
     return {
         "service": "activity-battery-checker",
         "status": "running",
@@ -131,7 +152,11 @@ async def user_batteries(garmin_user_id: str):
                 continue
 
             # Key by serial number if available, else by name
-            key = str(device.get("serial_number")) if device.get("serial_number") else device.get("device_name", "unknown")
+            key = (
+                str(device.get("serial_number"))
+                if device.get("serial_number")
+                else device.get("device_name", "unknown")
+            )
 
             # Only keep the first (most recent) reading per device
             if key not in device_batteries:
@@ -155,8 +180,12 @@ async def user_batteries(garmin_user_id: str):
 
 
 @app.get("/users/{garmin_user_id}/battery-history")
-async def battery_history(garmin_user_id: str, device_serial: str = None,
-                          device_name: str = None, limit: int = 100):
+async def battery_history(
+    garmin_user_id: str,
+    device_serial: str = None,
+    device_name: str = None,
+    limit: int = 100,
+):
     """
     Get battery voltage/status history for a specific device.
 
@@ -188,7 +217,8 @@ async def battery_history(garmin_user_id: str, device_serial: str = None,
 
     with get_db(config.db_path) as db:
         readings = get_device_history(
-            db, garmin_user_id,
+            db,
+            garmin_user_id,
             device_serial=device_serial,
             device_name=device_name,
             limit=limit,
@@ -213,8 +243,7 @@ async def battery_history(garmin_user_id: str, device_serial: str = None,
 
 
 @app.post("/upload/fit")
-async def upload_fit(request: Request,
-                     garmin_user_id: str = Query(default=None)):
+async def upload_fit(request: Request, garmin_user_id: str = Query(default=None)):
     """
     Upload a FIT file for instant battery analysis.
 
@@ -225,7 +254,9 @@ async def upload_fit(request: Request,
     """
     body = await request.body()
     if len(body) < 12:
-        raise HTTPException(status_code=400, detail="File too small to be a valid FIT file")
+        raise HTTPException(
+            status_code=400, detail="File too small to be a valid FIT file"
+        )
 
     result = parse_fit_bytes(body)
     if not result.success:
@@ -240,7 +271,14 @@ async def upload_fit(request: Request,
         with get_db(config.db_path) as db:
             # Ensure user exists
             upsert_user(db, garmin_user_id)
-            head_unit = next((d.device_name for d in result.devices if d.classification == 'head_unit'), None)
+            head_unit = next(
+                (
+                    d.device_name
+                    for d in result.devices
+                    if d.classification == "head_unit"
+                ),
+                None,
+            )
             upsert_activity(
                 db,
                 garmin_user_id=garmin_user_id,
@@ -258,7 +296,9 @@ async def upload_fit(request: Request,
                     db,
                     garmin_user_id=garmin_user_id,
                     garmin_activity_id=activity_id,
-                    device_serial=str(device.serial_number) if device.serial_number else None,
+                    device_serial=str(device.serial_number)
+                    if device.serial_number
+                    else None,
                     device_name=device.device_name,
                     classification=device.classification,
                     manufacturer=device.manufacturer,
@@ -294,9 +334,7 @@ async def retry(activity_id: str):
 
 
 @app.get("/ui")
-async def ui():
-    """Serve the single-page dashboard."""
-    return FileResponse(
-        "static/index.html",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-    )
+async def ui(request: Request):
+    """Redirect legacy UI path to the root dashboard."""
+    query = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/{query}", status_code=307)

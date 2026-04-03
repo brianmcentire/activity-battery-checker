@@ -134,6 +134,6 @@ def create_auth_router(config: AppConfig) -> APIRouter:
 
         logger.info("User %s connected successfully", garmin_user_id)
         ui_base_url = config.ui_base_url.rstrip("/")
-        return RedirectResponse(url=f"{ui_base_url}/ui?user={garmin_user_id}")
+        return RedirectResponse(url=f"{ui_base_url}/?user={garmin_user_id}")
 
     return router

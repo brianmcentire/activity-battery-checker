@@ -58,7 +58,7 @@ class TestAuthCallbackRedirect:
         )
 
         assert response.status_code in (302, 307)
-        assert response.headers["location"] == "http://localhost:8000/ui?user=user-123"
+        assert response.headers["location"] == "http://localhost:8000/?user=user-123"
 
         with get_db(config.db_path) as db:
             stored_user = db.execute(

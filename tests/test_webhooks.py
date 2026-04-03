@@ -10,7 +10,10 @@ from fastapi.testclient import TestClient
 
 from app.main import app, config
 from app.database import init_db, get_db, upsert_user, store_token
-from app.services.activity_processor import should_skip_activity_type, score_parse_result
+from app.services.activity_processor import (
+    should_skip_activity_type,
+    score_parse_result,
+)
 from battery_parser import ParseResult, DeviceInfo
 
 from fixtures.garmin_payloads import (
@@ -45,67 +48,88 @@ class TestHealthCheck:
     def test_root(self):
         response = client.get("/")
         assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        assert "Activity Battery Checker" in response.text
+
+    def test_healthz(self):
+        response = client.get("/healthz")
+        assert response.status_code == 200
         data = response.json()
         assert data["service"] == "activity-battery-checker"
         assert data["status"] == "running"
 
+    def test_ui_redirects_to_root(self):
+        response = client.get("/ui", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/"
+
+    def test_ui_redirect_preserves_query_string(self):
+        response = client.get("/ui?user=test-user-001", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/?user=test-user-001"
+
 
 class TestActivitySummaryWebhook:
     def test_outdoor_ride_accepted(self):
-        response = client.post("/webhooks/garmin/activities",
-                              json=ACTIVITY_SUMMARY_OUTDOOR_RIDE)
+        response = client.post(
+            "/webhooks/garmin/activities", json=ACTIVITY_SUMMARY_OUTDOOR_RIDE
+        )
         assert response.status_code == 200
         assert response.json()["count"] == 1
 
     def test_indoor_ride_accepted(self):
         """Indoor rides should NOT be skipped — they have real sensor data."""
-        response = client.post("/webhooks/garmin/activities",
-                              json=ACTIVITY_SUMMARY_INDOOR_RIDE)
+        response = client.post(
+            "/webhooks/garmin/activities", json=ACTIVITY_SUMMARY_INDOOR_RIDE
+        )
         assert response.status_code == 200
         assert response.json()["count"] == 1
 
     def test_virtual_ride_skipped(self):
-        response = client.post("/webhooks/garmin/activities",
-                              json=ACTIVITY_SUMMARY_VIRTUAL_RIDE)
+        response = client.post(
+            "/webhooks/garmin/activities", json=ACTIVITY_SUMMARY_VIRTUAL_RIDE
+        )
         assert response.status_code == 200
 
     def test_manual_ride_skipped(self):
-        response = client.post("/webhooks/garmin/activities",
-                              json=ACTIVITY_SUMMARY_MANUAL)
+        response = client.post(
+            "/webhooks/garmin/activities", json=ACTIVITY_SUMMARY_MANUAL
+        )
         assert response.status_code == 200
 
     def test_multi_activity(self):
-        response = client.post("/webhooks/garmin/activities",
-                              json=MULTI_ACTIVITY_SUMMARY)
+        response = client.post(
+            "/webhooks/garmin/activities", json=MULTI_ACTIVITY_SUMMARY
+        )
         assert response.status_code == 200
         assert response.json()["count"] == 3
 
 
 class TestActivityFileWebhook:
     def test_fit_file_accepted(self):
-        response = client.post("/webhooks/garmin/activity-files",
-                              json=ACTIVITY_FILE_FIT)
+        response = client.post(
+            "/webhooks/garmin/activity-files", json=ACTIVITY_FILE_FIT
+        )
         assert response.status_code == 200
         assert response.json()["count"] == 1
 
     def test_tcx_file_handled(self):
-        response = client.post("/webhooks/garmin/activity-files",
-                              json=ACTIVITY_FILE_TCX)
+        response = client.post(
+            "/webhooks/garmin/activity-files", json=ACTIVITY_FILE_TCX
+        )
         assert response.status_code == 200
 
 
 class TestDeregistration:
     def test_deregistration(self):
-        response = client.post("/webhooks/garmin/deregistrations",
-                              json=DEREGISTRATION)
+        response = client.post("/webhooks/garmin/deregistrations", json=DEREGISTRATION)
         assert response.status_code == 200
         assert response.json()["count"] == 1
 
 
 class TestPermissionChange:
     def test_permission_change(self):
-        response = client.post("/webhooks/garmin/permissions",
-                              json=PERMISSION_CHANGE)
+        response = client.post("/webhooks/garmin/permissions", json=PERMISSION_CHANGE)
         assert response.status_code == 200
         assert response.json()["count"] == 1
 
@@ -135,8 +159,13 @@ class TestActivityFiltering:
 
 
 class TestActivityScoring:
-    def _make_result(self, devices_with_battery=0, has_head_unit=False,
-                     has_external_sensors=False, success=True):
+    def _make_result(
+        self,
+        devices_with_battery=0,
+        has_head_unit=False,
+        has_external_sensors=False,
+        success=True,
+    ):
         return ParseResult(
             success=success,
             devices_with_battery=devices_with_battery,
