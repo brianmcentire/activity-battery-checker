@@ -72,9 +72,10 @@
             <!-- Device cards -->
             <div x-show="devices.length > 0" class="mb-8">
                 <h2 class="text-lg font-semibold text-gray-300 mb-4">Devices</h2>
-                <div class="grid gap-4 sm:grid-cols-2">
-                    <template x-for="device in devices" :key="device.serial_number || device.device_name">
-                        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+                <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    <template x-for="device in sortedDevices" :key="device.serial_number || device.device_name">
+                        <div class="rounded-xl p-5"
+                             :class="isStatusOk(device.battery_status) ? 'bg-gray-900 border border-gray-800' : 'bg-red-950 border border-red-800'">
                             <div class="flex items-start justify-between mb-3">
                                 <div>
                                     <h3 class="font-semibold text-white" x-text="device.device_name"></h3>
@@ -478,7 +479,7 @@ function app() {
             if (hasLevel) {
                 scales.yLevel = {
                     position: hasVoltage ? 'right' : 'left',
-                    title: { display: true, text: 'Level (%)', color: '#9ca3af' },
+                    title: { display: true, text: 'Level (%)', color: '#9ca3af', rotation: 270 },
                     min: 0,
                     max: 100,
                     ticks: { color: '#6b7280' },
@@ -572,6 +573,20 @@ function app() {
             } catch (e) {
                 this.uploadError = 'Upload failed: ' + e.message;
             }
+        },
+
+        get sortedDevices() {
+            return [...this.devices].sort((a, b) => {
+                const aOk = this.isStatusOk(a.battery_status);
+                const bOk = this.isStatusOk(b.battery_status);
+                if (aOk !== bOk) return aOk ? 1 : -1;
+                return (a.device_name || '').localeCompare(b.device_name || '');
+            });
+        },
+
+        isStatusOk(status) {
+            if (!status) return true;
+            return ['ok', 'good', 'new'].includes(status.toLowerCase());
         },
 
         statusColor(status) {
