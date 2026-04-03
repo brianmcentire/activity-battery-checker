@@ -383,7 +383,13 @@ function app() {
             let hasVoltage = false;
             let hasLevel = false;
 
-            for (const [serial, readings] of Object.entries(this.history)) {
+            const sortedDevices = Object.entries(this.history).sort((a, b) => {
+                const nameA = deviceNames[a[0]] || a[0];
+                const nameB = deviceNames[b[0]] || b[0];
+                return nameA.localeCompare(nameB);
+            });
+
+            for (const [serial, readings] of sortedDevices) {
                 const label = deviceNames[serial] || `Device ${serial.slice(0,8)}`;
                 const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
 
