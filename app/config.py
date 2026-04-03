@@ -12,23 +12,31 @@ from dataclasses import dataclass, field
 @dataclass
 class GarminConfig:
     """Garmin API credentials and endpoints."""
+
     consumer_key: str = ""
     consumer_secret: str = ""
     # Base URL for Garmin Connect API
     api_base_url: str = "https://apis.garmin.com"
     # OAuth 1 endpoints
-    request_token_url: str = "https://connectapi.garmin.com/oauth-service/oauth/request_token"
+    request_token_url: str = (
+        "https://connectapi.garmin.com/oauth-service/oauth/request_token"
+    )
     authorize_url: str = "https://connect.garmin.com/oauthConfirm"
-    access_token_url: str = "https://connectapi.garmin.com/oauth-service/oauth/access_token"
+    access_token_url: str = (
+        "https://connectapi.garmin.com/oauth-service/oauth/access_token"
+    )
 
 
 @dataclass
 class AppConfig:
     """Application-level configuration."""
+
     # SQLite database path
     db_path: str = "activity_battery.db"
     # Base URL for webhook callbacks (used in Garmin registration)
     webhook_base_url: str = "http://localhost:8000"
+    # Base URL for browser redirects after auth completes
+    ui_base_url: str = "http://localhost:8000"
     # Debug: save FIT files to disk
     save_fit_files: bool = False
     fit_files_dir: str = "debug_fit_files"
@@ -51,7 +59,11 @@ def load_config() -> AppConfig:
     config = AppConfig(
         db_path=_resolve_path(os.environ.get("DB_PATH", "activity_battery.db")),
         webhook_base_url=os.environ.get("WEBHOOK_BASE_URL", "http://localhost:8000"),
-        save_fit_files=os.environ.get("SAVE_FIT_FILES", "").lower() in ("true", "1", "yes"),
+        ui_base_url=os.environ.get(
+            "UI_BASE_URL", os.environ.get("WEBHOOK_BASE_URL", "http://localhost:8000")
+        ),
+        save_fit_files=os.environ.get("SAVE_FIT_FILES", "").lower()
+        in ("true", "1", "yes"),
         fit_files_dir=_resolve_path(os.environ.get("FIT_FILES_DIR", "debug_fit_files")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         garmin=GarminConfig(

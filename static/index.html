@@ -270,6 +270,15 @@ function app() {
         chartFrom: '',
         chartTo: '',
 
+        async fetchJson(url, options = {}) {
+            const response = await fetch(url, {
+                cache: 'no-store',
+                headers: { 'Cache-Control': 'no-cache' },
+                ...options,
+            });
+            return response.json();
+        },
+
         init() {
             // Check URL params first (from OAuth callback)
             const params = new URLSearchParams(window.location.search);
@@ -309,13 +318,14 @@ function app() {
             this.loading = true;
             try {
                 const [batteries, acts, hist] = await Promise.all([
-                    fetch(`/users/${this.userId}/batteries`).then(r => r.json()),
-                    fetch(`/users/${this.userId}/activities?limit=20`).then(r => r.json()),
-                    fetch(`/users/${this.userId}/battery-history`).then(r => r.json()),
+                    this.fetchJson(`/users/${this.userId}/batteries`),
+                    this.fetchJson(`/users/${this.userId}/activities?limit=20`),
+                    this.fetchJson(`/users/${this.userId}/battery-history`),
                 ]);
                 this.devices = batteries.devices || [];
                 this.activities = acts.activities || [];
                 this.history = hist.devices || {};
+                this.chartVisible = false;
                 this.$nextTick(() => this.renderChart());
             } catch (e) {
                 console.error('Failed to load data:', e);
@@ -337,12 +347,26 @@ function app() {
             this.chartVisible = hasChartData;
             if (!hasChartData) return;
 
-            // Wait for canvas to be visible in DOM before rendering
-            this.$nextTick(() => {
-                const canvas = this.$refs.chartCanvas;
-                if (!canvas) return;
-                this._drawChart(canvas);
-            });
+            this.$nextTick(() => this.waitForChartCanvas());
+        },
+
+        waitForChartCanvas(attempt = 0) {
+            const canvas = this.$refs.chartCanvas;
+            if (!canvas) {
+                if (attempt < 20) requestAnimationFrame(() => this.waitForChartCanvas(attempt + 1));
+                return;
+            }
+
+            const parent = canvas.parentElement;
+            const visible = this.chartVisible && canvas.offsetParent !== null;
+            const hasSize = parent && parent.clientWidth > 0;
+
+            if (!visible || !hasSize) {
+                if (attempt < 20) requestAnimationFrame(() => this.waitForChartCanvas(attempt + 1));
+                return;
+            }
+
+            this._drawChart(canvas);
         },
 
         setChartRange(months) {
@@ -555,6 +579,7 @@ function app() {
 
                 const resp = await fetch(url, {
                     method: 'POST',
+                    cache: 'no-store',
                     headers: { 'Content-Type': 'application/octet-stream' },
                     body: bytes,
                 });

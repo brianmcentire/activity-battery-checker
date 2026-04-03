@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from app.config import AppConfig
-from app.database import get_db, upsert_user, store_token
+from app.database import get_db, upsert_user, store_token, get_user_id_by_access_token
 from app.services.garmin_client import GarminOAuth1Client
 
 logger = logging.getLogger(__name__)
@@ -58,15 +58,16 @@ def create_auth_router(config: AppConfig) -> APIRouter:
         """Start OAuth 1 flow: get request token and redirect to Garmin."""
         if not config.garmin.consumer_key:
             raise HTTPException(
-                status_code=503,
-                detail="Garmin consumer key not configured"
+                status_code=503, detail="Garmin consumer key not configured"
             )
 
         try:
             token = garmin_client.get_request_token()
         except Exception as e:
             logger.error("Failed to get request token: %s", e)
-            raise HTTPException(status_code=502, detail="Failed to get request token from Garmin")
+            raise HTTPException(
+                status_code=502, detail="Failed to get request token from Garmin"
+            )
 
         request_token = token["oauth_token"]
         _store_pending(request_token, token)
@@ -80,15 +81,13 @@ def create_auth_router(config: AppConfig) -> APIRouter:
         """Handle Garmin OAuth 1 callback after user authorization."""
         if not oauth_token or not oauth_verifier:
             raise HTTPException(
-                status_code=400,
-                detail="Missing oauth_token or oauth_verifier"
+                status_code=400, detail="Missing oauth_token or oauth_verifier"
             )
 
         pending = _pop_pending(oauth_token)
         if not pending:
             raise HTTPException(
-                status_code=400,
-                detail="Unknown or expired request token"
+                status_code=400, detail="Unknown or expired request token"
             )
 
         try:
@@ -100,19 +99,33 @@ def create_auth_router(config: AppConfig) -> APIRouter:
         except Exception as e:
             logger.error("Failed to exchange token: %s", e)
             raise HTTPException(
-                status_code=502,
-                detail="Failed to exchange token with Garmin"
+                status_code=502, detail="Failed to exchange token with Garmin"
             )
 
         access_token = access["oauth_token"]
         token_secret = access["oauth_token_secret"]
 
+        logger.info("Access token response keys: %s", list(access.keys()))
+
         # Garmin includes userId in the access token response
         garmin_user_id = access.get("userId") or access.get("user_id")
         if not garmin_user_id:
-            # Some Garmin implementations return it differently
-            logger.warning("No userId in access token response, using oauth_token as fallback")
-            garmin_user_id = access_token
+            # Garmin may omit userId when re-authorizing an already-connected account
+            # (returns same token without a fresh userId). Look up by access token first
+            # to avoid creating a ghost user with the token as its ID.
+            with get_db(config.db_path) as db:
+                garmin_user_id = get_user_id_by_access_token(db, access_token)
+            if garmin_user_id:
+                logger.info(
+                    "No userId in response; matched existing user %s by access token",
+                    garmin_user_id,
+                )
+            else:
+                logger.warning(
+                    "No userId in access token response and token not recognised; "
+                    "using oauth_token as fallback user ID"
+                )
+                garmin_user_id = access_token
 
         # Store user and token
         with get_db(config.db_path) as db:
@@ -120,7 +133,7 @@ def create_auth_router(config: AppConfig) -> APIRouter:
             store_token(db, garmin_user_id, access_token, token_secret)
 
         logger.info("User %s connected successfully", garmin_user_id)
-        # Redirect to UI with user ID
-        return RedirectResponse(url=f"/?user={garmin_user_id}")
+        ui_base_url = config.ui_base_url.rstrip("/")
+        return RedirectResponse(url=f"{ui_base_url}/ui?user={garmin_user_id}")
 
     return router
