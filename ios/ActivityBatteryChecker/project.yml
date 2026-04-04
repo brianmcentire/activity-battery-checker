@@ -1,0 +1,29 @@
+name: ActivityBatteryChecker
+options:
+  bundleIdPrefix: com.activitybatterychecker
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "26.0"
+
+targets:
+  ActivityBatteryChecker:
+    type: application
+    platform: iOS
+    sources:
+      - ActivityBatteryChecker
+    settings:
+      base:
+        INFOPLIST_KEY_CFBundleDisplayName: Activity Battery Checker
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: true
+    info:
+      path: ActivityBatteryChecker/Info.plist
+      properties:
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - activitybattery
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true

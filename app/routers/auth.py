@@ -54,8 +54,11 @@ def create_auth_router(config: AppConfig) -> APIRouter:
     garmin_client = GarminOAuth1Client(config.garmin)
 
     @router.get("/connect")
-    async def connect():
-        """Start OAuth 1 flow: get request token and redirect to Garmin."""
+    async def connect(redirect: str = None):
+        """Start OAuth 1 flow: get request token and redirect to Garmin.
+
+        Pass ?redirect=app to redirect back to the iOS app after auth.
+        """
         if not config.garmin.consumer_key:
             raise HTTPException(
                 status_code=503, detail="Garmin consumer key not configured"
@@ -70,6 +73,8 @@ def create_auth_router(config: AppConfig) -> APIRouter:
             )
 
         request_token = token["oauth_token"]
+        if redirect:
+            token["_redirect"] = redirect
         _store_pending(request_token, token)
 
         authorize_url = garmin_client.get_authorize_url(request_token)
@@ -133,6 +138,13 @@ def create_auth_router(config: AppConfig) -> APIRouter:
             store_token(db, garmin_user_id, access_token, token_secret)
 
         logger.info("User %s connected successfully", garmin_user_id)
+
+        # iOS app: redirect to custom URL scheme
+        if pending.get("_redirect") == "app":
+            return RedirectResponse(
+                url=f"activitybattery://auth?user={garmin_user_id}"
+            )
+
         ui_base_url = config.ui_base_url.rstrip("/")
         return RedirectResponse(url=f"{ui_base_url}/?user={garmin_user_id}")
 
